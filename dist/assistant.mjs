@@ -1,4 +1,4 @@
-import {catalogFromData,makePrompt,parsePlan,stepText,arithmeticPlan,consumeModelResults,makeAnswerPrompt,consumeAnswerResults,answerWarnings,formatErrorReport} from './assistant-core.mjs?v=eea5537a91';
+import {catalogFromData,makePrompt,parsePlan,stepText,arithmeticPlan,consumeModelResults,makeAnswerPrompt,consumeAnswerResults,answerWarnings,formatErrorReport} from './assistant-core.mjs?v=7864357e60';
 const local=location.hostname==='127.0.0.1'&&location.port==='8771',sites=catalogFromData(window.LITERACY_DATA,window.BOOKMARK_DATA);
 let plan=null,active=0,image=null,originalImage=null,csrf='',rules='',busy=false,pipWindow=null,toastTimer,modelPlans={},modelErrors={},chosenModel='',pendingModels=[],modelStages={};
 const memory={get(k,f=null){try{return JSON.parse(sessionStorage.getItem('literacy-assistant-'+k))??f;}catch{return f;}},set(k,v){try{sessionStorage.setItem('literacy-assistant-'+k,JSON.stringify(v));}catch{}},remove(k){try{sessionStorage.removeItem('literacy-assistant-'+k);}catch{}}};

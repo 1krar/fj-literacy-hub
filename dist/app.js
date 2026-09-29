@@ -19,7 +19,7 @@
   const featured=[
     {id:'featured-deepseek',name:'DeepSeek',url:'https://chat.deepseek.com/a/chat/s/',mark:'DS',description:'AI 辅助分析',tone:1},
     {id:'featured-cnki',name:'知网 CNKI',url:'https://www.cnki.net/',mark:'知',description:'综合学术资源',tone:0},
-    {id:'featured-wanfang',name:'万方',url:'https://s.wanfangdata.com.cn/advanced-search/standard?t=1789805788071',mark:'万',description:'标准高级检索',tone:2},
+    {id:'featured-wanfang',name:'万方',url:'https://s.wanfangdata.com.cn/advanced-search/paper',mark:'万',description:'论文高级检索',tone:2},
     {id:'featured-cnki-advanced',name:'高级知网',url:'https://kns.cnki.net/kns8s/AdvSearch',mark:'知+',description:'字段与条件组合',tone:0},
     {id:'featured-vip-advanced',name:'高级维普',url:'https://qikan.cqvip.com/Qikan/Search/Advance?from=Qikan_Search_Index',mark:'维+',description:'期刊高级检索',tone:3}
   ];

@@ -2,7 +2,7 @@ export function catalogFromData(data, books) {
   const sites=data.resources.flatMap(r=>[{id:'r-'+r.id,name:r.name,url:r.url},...(r.aliases||[]).map(id=>({id:'r-'+id,name:r.name,url:r.url,alias:true}))]);
   const walk=nodes=>nodes.forEach(n=>n.children?walk(n.children):n.url&&sites.push({id:n.id,name:n.name,url:n.url}));
   walk(books.folders);
-  sites.unshift({id:'quick-cnki',name:'知网高级检索',url:'https://kns.cnki.net/kns8s/AdvSearch'},{id:'quick-vip',name:'维普高级检索',url:'https://qikan.cqvip.com/Qikan/Search/Advance?from=Qikan_Search_Index'},{id:'quick-wanfang',name:'万方标准高级检索',url:'https://s.wanfangdata.com.cn/advanced-search/standard?t=1789805788071'});
+  sites.unshift({id:'quick-cnki',name:'知网高级检索',url:'https://kns.cnki.net/kns8s/AdvSearch'},{id:'quick-vip',name:'维普高级检索',url:'https://qikan.cqvip.com/Qikan/Search/Advance?from=Qikan_Search_Index'},{id:'quick-wanfang',name:'万方论文高级检索',url:'https://s.wanfangdata.com.cn/advanced-search/paper'});
   return sites.filter(s=>/^https?:\/\//.test(s.url));
 }
 export function candidateSites(sites,question) {
