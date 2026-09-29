@@ -1,0 +1,17 @@
+{
+  "name": "fj-literacy-hub",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/assistant-core.test.mjs",
+    "cf:whoami": "node scripts/cloudflare.mjs whoami",
+    "cf:verify": "node scripts/cloudflare.mjs verify",
+    "cf:login": "wrangler login",
+    "deploy": "npm run build && node scripts/cloudflare.mjs pages deploy dist --project-name=fj-literacy-hub --branch=main",
+    "deploy:preview": "npm run build && node scripts/cloudflare.mjs pages deploy dist --project-name=fj-literacy-hub --branch=preview"
+  },
+  "devDependencies": {
+    "wrangler": "4.143.0"
+  }
+}

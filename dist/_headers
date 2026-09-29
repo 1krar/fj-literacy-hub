@@ -1,0 +1,14 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' http://127.0.0.1:8771; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+
+/launch-assistant.html
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8771; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+
+/resources.js
+  Cache-Control: public, max-age=3600
+
+/resources.json
+  Cache-Control: public, max-age=3600

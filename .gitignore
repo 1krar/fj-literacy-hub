@@ -1,0 +1,17 @@
+node_modules/
+.runtime/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+**/__pycache__/
+*.pyc
+cloudflare-account.json
+output/
+*-qa.png
+qa-*.png
+*-ready.png
+*-results.json
+*.enc
+*.dpapi
