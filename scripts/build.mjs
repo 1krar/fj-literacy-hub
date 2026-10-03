@@ -80,3 +80,9 @@ fs.writeFileSync(path.join(root,'dist','launch-assistant.html'),launchHtml);
 const guidePath=path.join(root,"dist","assistant-guide.html");
 const guideCssHash=createHash("sha256").update(fs.readFileSync(path.join(root,"dist","launch-assistant.css"))).digest("hex").slice(0,10);
 fs.writeFileSync(guidePath,fs.readFileSync(guidePath,"utf8").replace(/launch-assistant\.css(?:\?v=[a-f0-9]+)?/g,"launch-assistant.css?v="+guideCssHash));
+let ctrlHtml=fs.readFileSync(path.join(root,'dist','ctrl-assistant.html'),'utf8');
+for(const asset of ['ctrl-assistant.css','ctrl-assistant.mjs']){
+  const hash=createHash('sha256').update(fs.readFileSync(path.join(root,'dist',asset))).digest('hex').slice(0,10);
+  ctrlHtml=ctrlHtml.replace(new RegExp(asset.replace('.', '\\.')+'(?:\\?v=[a-f0-9]+)?','g'),asset+'?v='+hash);
+}
+fs.writeFileSync(path.join(root,'dist','ctrl-assistant.html'),ctrlHtml);

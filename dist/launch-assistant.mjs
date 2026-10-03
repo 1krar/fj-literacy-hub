@@ -1,5 +1,9 @@
 const status=document.querySelector('#status'),detail=document.querySelector('#detail');
 const start=document.querySelector('#start'),local='http://127.0.0.1:8771';
+const ctrl=new URLSearchParams(location.search).get('tool')==='ctrl';
+const target=ctrl?'ctrl-assistant.html':'assistant.html';
+if(ctrl){document.title='启动 CTRL 助手 · 素养聚合';document.querySelector('h1').textContent='打开 CTRL 助手';document.querySelector('main>p:nth-of-type(2)').textContent='连接本机助手，快速 OCR、提取关键词和检索网站。';}
+document.querySelector('#enter').href=local+'/'+target;
 let deadline=0,timer,checking=false,attempted=false;
 function schedule(){clearTimeout(timer);timer=setTimeout(check,1500);}
 async function check(){
@@ -10,7 +14,7 @@ async function check(){
     const result=await response.json();
     if(response.ok&&result.app==='literacy-assistant'&&result.ready===true){
       clearTimeout(timer);status.textContent='本机助手已就绪，正在进入…';
-      detail.textContent='进入后会检查所选模型的连接状态。';window.location.replace(local+'/assistant.html');return;
+      detail.textContent='进入后会检查所选模型的连接状态。';window.location.replace(local+'/'+target);return;
     }
   }catch{/* A blocked local-network probe does not imply that the helper failed. */}
   finally{checking=false;}

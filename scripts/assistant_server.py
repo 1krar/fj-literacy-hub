@@ -19,6 +19,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_IMAGE = 5 * 1024 * 1024
+if str(ROOT / 'scripts') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'scripts'))
+from ctrl_multi import MultiCtrlJobs
 
 
 def read_input(data):
@@ -170,7 +173,7 @@ class Jobs:
                 self.active = None
 
 
-def handler_for(jobs, session):
+def handler_for(jobs, session, ctrl_jobs=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # Never log questions, images, session tokens or model responses.
@@ -237,6 +240,12 @@ def handler_for(jobs, session):
                         self.reply(400, {'error': '未知模型'})
                     else:
                         self.reply(200, jobs.providers[name].status())
+                elif path == '/api/ctrl/session' and ctrl_jobs:
+                    try:
+                        session_id = urlsplit(self.path).query.removeprefix('id=')
+                        self.reply(200, ctrl_jobs.get_session(session_id))
+                    except KeyError:
+                        self.reply(404, {'error': 'CTRL 会话已过期，请重新提交题目'})
                 elif path.startswith('/api/jobs/'):
                     try:
                         self.reply(200, jobs.get(path.rsplit('/', 1)[-1]))
@@ -265,6 +274,10 @@ def handler_for(jobs, session):
                 data = json.loads(self.rfile.read(size))
                 if self.path == '/api/jobs':
                     self.reply(202, jobs.submit(data))
+                elif self.path == '/api/ctrl/start' and ctrl_jobs:
+                    self.reply(202, ctrl_jobs.start(data))
+                elif self.path == '/api/ctrl/answer' and ctrl_jobs:
+                    self.reply(202, ctrl_jobs.answer(data))
                 elif self.path == '/api/browser/open':
                     name = data.get('model', 'gemini')
                     if name not in jobs.providers:
@@ -288,10 +301,11 @@ def main():
         default_root = ROOT / 'vendor/evidence-chain'
     root = Path(os.environ.get('EVIDENCE_CHAIN_ROOT', default_root))
     jobs = Jobs(load_provider(root))
+    ctrl_jobs = MultiCtrlJobs(jobs, read_input)
     class Server(ThreadingHTTPServer):
         allow_reuse_address = False
         daemon_threads = True
-    server = Server(('127.0.0.1', args.port), handler_for(jobs, secrets.token_urlsafe(32)))
+    server = Server(('127.0.0.1', args.port), handler_for(jobs, secrets.token_urlsafe(32), ctrl_jobs))
     print(f'比赛助手就绪：http://127.0.0.1:{args.port}/assistant.html', flush=True)
     try:
         server.serve_forever()
