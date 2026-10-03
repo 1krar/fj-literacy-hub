@@ -77,7 +77,7 @@ async function watchJob(job){
   }
   throw new Error('本机等待超时；已有路线仍可使用。请检查所选模型原会话，不要重复提交。');
 }
-function failure(error,started,hadImage){recordFault('route',routeRequest?.models||selectedModels(),modelErrors,error.message,memory.get('job')?.id);memory.remove('job');$('route-empty').querySelector('h3').textContent='本次尚未生成路线';$('route-empty').querySelector('p').textContent='查看左侧提示，或通过手动Gemini流程导入完整回答。';$('job-status').textContent=error.message+(started?' 本次未自动重发。':'')+(hadImage?' 如需重新提交，请重新选择截图。':'');memory.set('last-status',$('job-status').textContent);}
+function failure(error,started,hadImage){recordFault('route',routeRequest?.models||selectedModels(),modelErrors,error.message,memory.get('job')?.id);memory.remove('job');$('route-empty').querySelector('h3').textContent='本次尚未生成路线';$('route-empty').querySelector('p').textContent='查看左侧提示，或通过手动模型网页流程导入完整回答。';$('job-status').textContent=error.message+(started?' 本次未自动重发。':'')+(hadImage?' 如需重新提交，请重新选择截图。':'');memory.set('last-status',$('job-status').textContent);}
 $('question').addEventListener('input',()=>memory.set('draft',$('question').value));
 
 async function runRoute(request,retry=false){
@@ -102,7 +102,7 @@ $('retry-route').addEventListener('click',()=>{
  if(!routeRequest){toast('请重新输入题目再生成路线');return;}
  const failed=Object.keys(modelErrors);runRoute({...routeRequest,models:failed.length?failed:routeRequest.models},true);
 });
-$('copy-prompt').addEventListener('click',()=>{const question=$('question').value.trim();if(!question&&!image){toast('先输入题目或截图');return;}copy(makePrompt(rules,question||'请识别并分析所附题目截图',sites));});$('import-plan').addEventListener('click',()=>{try{const imported=parsePlan($('model-json').value,sites);resetModels();originalImage=image;showPlan(imported);$('job-status').textContent='已导入 Gemini 路线。';memory.set('last-status',$('job-status').textContent);}catch(e){$('job-status').textContent=e.message;recordFault('route',selectedModels(),{},e.message);}});
+$('copy-prompt').addEventListener('click',()=>{const question=$('question').value.trim();if(!question&&!image){toast('先输入题目或截图');return;}copy(makePrompt(rules,question||'请识别并分析所附题目截图',sites));});$('import-plan').addEventListener('click',()=>{try{const imported=parsePlan($('model-json').value,sites);resetModels();originalImage=image;showPlan(imported);$('job-status').textContent='已导入模型路线。';memory.set('last-status',$('job-status').textContent);}catch(e){$('job-status').textContent=e.message;recordFault('route',selectedModels(),{},e.message);}});
 for(const name of ['gemini','deepseek'])$('model-'+name).addEventListener('change',()=>{memory.set('models',selectedModels());if(local)refresh(true);});
 $('refresh-status').addEventListener('click',refresh);$('open-gemini').addEventListener('click',async()=>{try{setStatus(await api('browser/open',{model:'gemini'}));}catch(e){toast(e.message);}});
 $('open-deepseek').addEventListener('click',async()=>{try{const result=await api('browser/open',{model:'deepseek'});$('connection-help').textContent=result.detail||'DeepSeek窗口已打开';await refresh();}catch(e){toast(e.message);}});
@@ -110,8 +110,8 @@ function returnRoute(){pipWindow?.close();}
 $('return-route').addEventListener('click',returnRoute);$('back-to-assistant').addEventListener('click',()=>{returnRoute();window.focus();$('question').scrollIntoView({behavior:'smooth',block:'center'});if(!busy)$('question').focus({preventScroll:true});});$('float-route').addEventListener('click',()=>pipWindow?returnRoute():openFloat());async function openFloat(){if(pipWindow)return;if(!window.documentPictureInPicture){$('route-notice').textContent='当前浏览器不支持置顶小窗。可以复制各步检索信息，或把助手页与数据库并排放置。';return;}try{let expired=false;const opening=window.documentPictureInPicture.requestWindow({width:480,height:700});opening.then(w=>{if(expired)w.close();}).catch(()=>{});let waitTimer;try{pipWindow=await Promise.race([opening,new Promise((_,reject)=>{waitTimer=setTimeout(()=>{expired=true;reject(new Error('timeout'));},5000);})]);}finally{clearTimeout(waitTimer);}const link=pipWindow.document.createElement('link');link.rel='stylesheet';link.href=document.querySelector('link[rel=stylesheet]').href;pipWindow.document.head.append(link);pipWindow.document.title='检索路线 · 素养聚合';pipWindow.document.body.className='pip-body';pipWindow.document.body.append($('route-board'));$('pip-return').hidden=false;$('float-route').textContent='收回小窗';pipWindow.addEventListener('pagehide',()=>{const board=pipWindow.document.getElementById('route-board');if(board)$('pip-return').parentElement.prepend(board);pipWindow=null;$('pip-return').hidden=true;$('float-route').textContent='置顶小窗 ↗';});}catch(e){pipWindow=null;$('route-notice').textContent='置顶小窗未能打开，请复制需要的检索信息，或把窗口并排放置。';}}
 for(const kind of ['route','answer'])$('report-'+kind).addEventListener('click',()=>copy(formatErrorReport(kind,faultRecords[kind])));
 renderFaults();
-const restoredModels=memory.get('models',['gemini']);for(const name of ['gemini','deepseek'])$('model-'+name).checked=restoredModels.includes(name);
-try{const response=await fetch('assistant-prompt.txt',{cache:'no-store'});if(!response.ok)throw new Error('拆题规则读取失败');rules=await response.text();if(local){const session=await api('session');csrf=session.session;$('local-link').hidden=true;$('model-controls').hidden=false;renderFaults();refresh(true);}else{$('connection').textContent='网页模式';$('connection-help').textContent='点击“启动并连接本机助手”自动启动环境并拆题；也可复制提示词，在已登录的 Gemini 网页操作后导入回答。';}$('analyze').disabled=false;}catch(e){$('connection').textContent='准备失败';$('connection-help').textContent=e.message;}
+const restoredModels=memory.get('models',['deepseek']);for(const name of ['gemini','deepseek'])$('model-'+name).checked=restoredModels.includes(name);
+try{const response=await fetch('assistant-prompt.txt',{cache:'no-store'});if(!response.ok)throw new Error('拆题规则读取失败');rules=await response.text();if(local){const session=await api('session');csrf=session.session;$('local-link').hidden=true;$('model-controls').hidden=false;renderFaults();refresh(true);}else{$('connection').textContent='网页模式';$('connection-help').textContent='点击“启动并连接本机助手”自动启动环境并拆题；也可复制提示词，在已登录的模型网页操作后导入回答。';}$('analyze').disabled=false;}catch(e){$('connection').textContent='准备失败';$('connection-help').textContent=e.message;}
 
 // Restore only this tab's own draft/route; resume a saved job via GET, never POST.
 $('question').value=memory.get('draft','');
@@ -183,7 +183,7 @@ $('copy-answer').addEventListener('click',()=>{
  const a=answerState.answers[answerState.chosen];if(!a)return;
  copy([answerState.question,'答案：'+(a.answer||'无法可靠作答'),a.explanation,'模型自评把握：'+a.confidence+'（非实际准确率）',...answerWarnings(a,answerState.mode,answerState.answers),...a.checks.map(x=>'核验：'+x)].join('\n\n'));
 });
-const restoredAnswerModels=memory.get('answer-models',['gemini']);for(const n of ['gemini','deepseek']){
+const restoredAnswerModels=memory.get('answer-models',['deepseek']);for(const n of ['gemini','deepseek']){
  $('answer-'+n).checked=restoredAnswerModels.includes(n);$('answer-'+n).addEventListener('change',()=>memory.set('answer-models',answerModels()));
 }
 const recoveredAnswer=memory.get('answer');if(recoveredAnswer&&plan&&recoveredAnswer.question===plan.question){answerState=recoveredAnswer;renderAnswers();}

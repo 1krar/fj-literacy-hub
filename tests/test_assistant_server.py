@@ -39,14 +39,14 @@ class InputTests(unittest.TestCase):
     def test_failure_never_becomes_completed(self):
         p = Provider(); p.result = {'status': 'timeout', 'partial_text': 'partial'}
         jobs = module.Jobs(p)
-        job = jobs.submit({'question': 'q', 'prompt': 'p'})
+        job = jobs.submit({'question': 'q', 'prompt': 'p', 'models': ['gemini']})
         jobs.pool.shutdown(wait=True)
         self.assertEqual(jobs.get(job['id'])['state'], 'failed')
         self.assertNotIn('text', jobs.get(job['id']))
     def test_image_removed_after_job(self):
         p = Provider(); jobs = module.Jobs(p)
         raw = b'\x89PNG\r\n\x1a\nfixture'
-        job = jobs.submit({'question': 'q', 'prompt': 'p', 'image': 'data:image/png;base64,' + base64.b64encode(raw).decode()})
+        job = jobs.submit({'question': 'q', 'prompt': 'p', 'models': ['gemini'], 'image': 'data:image/png;base64,' + base64.b64encode(raw).decode()})
         jobs.pool.shutdown(wait=True)
         self.assertEqual(jobs.get(job['id'])['state'], 'completed')
         self.assertFalse(p.images[0].exists())
@@ -74,6 +74,7 @@ class InputTests(unittest.TestCase):
         self.assertEqual(set(jobs.get(job['id'])['results']), {'gemini', 'deepseek'})
     def test_models_validated_before_submission(self):
         jobs = module.Jobs({'gemini': Provider(), 'deepseek': Provider()})
+        self.assertEqual(module.selected_models({}), ['deepseek'])
         for names in [[], ['unknown'], ['gemini', 'gemini']]:
             with self.assertRaises(ValueError): jobs.submit({'question': 'q', 'prompt': 'p', 'models': names})
         jobs.pool.shutdown(wait=True)
@@ -151,7 +152,7 @@ class InputTests(unittest.TestCase):
         class CleanupProvider(Provider):
             def close_saved_response(inner, receipt): raise RuntimeError('cleanup failed')
         p=CleanupProvider(); p.result['cleanup_receipt']='owned'
-        jobs=module.Jobs(p); job=jobs.submit({'question':'q','prompt':'p'}); jobs.pool.shutdown(wait=True)
+        jobs=module.Jobs(p); job=jobs.submit({'question':'q','prompt':'p','models':['gemini']}); jobs.pool.shutdown(wait=True)
         self.assertEqual(jobs.get(job['id'])['state'],'completed')
         self.assertEqual(jobs.get(job['id'])['results']['gemini']['tab_cleanup'],'retained')
 
@@ -204,7 +205,7 @@ class HTTPTests(unittest.TestCase):
         with self.request('/assistant.html', h) as r: self.assertEqual(r.status, 200)
         with self.assertRaises(HTTPError): self.request('/api/session', h)
     def test_job_submission(self):
-        with self.request('/api/jobs', {'X-Assistant-Session': 'test-session'}, {'question': 'q', 'prompt': 'p'}) as r:
+        with self.request('/api/jobs', {'X-Assistant-Session': 'test-session'}, {'question': 'q', 'prompt': 'p', 'models': ['gemini']}) as r:
             self.assertEqual(r.status, 202)
             self.assertIn('id', json.load(r))
 

@@ -73,7 +73,7 @@ def load_provider(evidence_root):
 
 
 def selected_models(data):
-    names = data.get('models', ['gemini'])
+    names = data.get('models', ['deepseek'])
     if not isinstance(names, list) or not names or len(names) > 2 or len(set(names)) != len(names) or any(n not in ('gemini', 'deepseek') for n in names):
         raise ValueError('请选择 Gemini、DeepSeek 或两者')
     return names
