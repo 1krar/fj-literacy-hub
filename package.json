@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test tests/assistant-core.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "cf:whoami": "node scripts/cloudflare.mjs whoami",
     "cf:verify": "node scripts/cloudflare.mjs verify",
     "cf:login": "wrangler login",
