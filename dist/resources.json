@@ -1335,6 +1335,21 @@
       "source": "两份备赛资料"
     },
     {
+      "id": "r272",
+      "name": "福建省卫生健康委员会",
+      "url": "https://wjw.fujian.gov.cn/",
+      "categories": [
+        "government"
+      ],
+      "modules": [
+        14
+      ],
+      "description": "福建省卫生健康政策、医卫服务与省级通知公告",
+      "mark": "闽卫健",
+      "kind": "website",
+      "source": "福建省卫生健康委员会官网"
+    },
+    {
       "id": "r077",
       "name": "国家药监局数据查询",
       "url": "https://www.nmpa.gov.cn/datasearch/home-index.html",

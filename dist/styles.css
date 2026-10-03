@@ -6,3 +6,5 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}.featured-link:hover{transform:none}}
 
 .title-assistant-link{color:inherit;text-decoration:none}.title-assistant-link:hover{color:var(--accent,#28674f)}.title-assistant-link:focus-visible{outline:3px solid #86b49a;outline-offset:5px;border-radius:4px}.about-contact{border-top:1px solid #e0e7df;margin-top:18px;padding-top:10px}.about-contact h3{font-size:15px;margin:8px 0}.about-contact p{overflow-wrap:anywhere}
+
+.related-section{margin-top:26px;border-top:1px solid var(--line);padding-top:22px}.related-section .section-title{margin-bottom:14px}.related-section h3{font-size:17px;margin:0}

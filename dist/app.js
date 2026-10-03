@@ -8,6 +8,9 @@
   if(state.category!=='all'&&!categoryMap[state.category])state.category='all';
   if(!['local','baidu','bing'].includes(state.engine))state.engine='local';
   const normalized=v=>String(v).normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim();
+  const pinyinOrder=[['a','阿'],['b','八'],['c','擦'],['d','搭'],['e','蛾'],['f','发'],['g','嘎'],['h','哈'],['j','击'],['k','喀'],['l','拉'],['m','妈'],['n','拿'],['o','哦'],['p','怕'],['q','期'],['r','然'],['s','撒'],['t','她'],['w','挖'],['x','西'],['y','压'],['z','匝']];
+  const pinyinCollator=new Intl.Collator('zh-CN',{sensitivity:'base'});
+  const initials=name=>[...name].map(ch=>{if(/[a-z0-9]/i.test(ch))return ch.toLowerCase();if(!/[\u3400-\u9fff]/.test(ch))return '';let initial='';for(const [letter,anchor] of pinyinOrder)if(pinyinCollator.compare(ch,anchor)>=0)initial=letter;return initial;}).join('');
   const palettes=[['#e7f0e5','#61855d'],['#e7edf8','#617ca7'],['#f6eee0','#a08147'],['#ede8f4','#8a76a0'],['#e6f0ee','#598983']];
   const folderMap=new Map(), bookEntries=[];
   function collect(nodes,path=[]){nodes.forEach(n=>{if(n.children){folderMap.set(n.id,{...n,path:[...path,n.name]});collect(n.children,[...path,n.name]);}else bookEntries.push({...n,source:'bookmarks',path,description:n.entry||path.slice(1).join(' / ')||'收藏夹栏 · 独立网页',mark:n.name.slice(0,2)});});}collect(data.folders);
@@ -18,15 +21,17 @@
   const apps=appOnlyEntries.map((r,i)=>({...r,id:'app-'+i,source:'resources',description:r.entry,categories:r.modules.length?[...new Set(r.modules.map(categoryForModule))]:['campus']}));
   const featured=[
     {id:'featured-deepseek',name:'DeepSeek',url:'https://chat.deepseek.com/a/chat/s/',mark:'DS',description:'AI 辅助分析',tone:1},
-    {id:'featured-cnki',name:'知网 CNKI',url:'https://www.cnki.net/',mark:'知',description:'综合学术资源',tone:0},
-    {id:'featured-wanfang',name:'万方',url:'https://s.wanfangdata.com.cn/advanced-search/paper',mark:'万',description:'论文高级检索',tone:2},
-    {id:'featured-cnki-advanced',name:'高级知网',url:'https://kns.cnki.net/kns8s/AdvSearch',mark:'知+',description:'字段与条件组合',tone:0},
-    {id:'featured-vip-advanced',name:'高级维普',url:'https://qikan.cqvip.com/Qikan/Search/Advance?from=Qikan_Search_Index',mark:'维+',description:'期刊高级检索',tone:3}
+    {id:'featured-cnki',name:'知网 CNKI',url:'https://www.cnki.net/',mark:'知',description:'综合学术资源',tone:0,categories:['academic']},
+    {id:'featured-wanfang',name:'万方',url:'https://s.wanfangdata.com.cn/advanced-search/paper',mark:'万',description:'论文高级检索',tone:2,categories:['academic']},
+    {id:'featured-cnki-advanced',name:'高级知网',url:'https://kns.cnki.net/kns8s/AdvSearch',mark:'知+',description:'字段与条件组合',tone:0,categories:['academic']},
+    {id:'featured-vip-advanced',name:'高级维普',url:'https://qikan.cqvip.com/Qikan/Search/Advance?from=Qikan_Search_Index',mark:'维+',description:'期刊高级检索',tone:3,categories:['academic']}
   ];
   const all=[...featured,...library,...bookEntries,...apps], allMap=new Map(all.map(r=>[r.id,r]));
   let pinned=storage.read('pinned',[]).filter(id=>allMap.has(id)), recent=storage.read('recent',[]).filter(id=>allMap.has(id)).slice(0,8);
   const index=new Map(all.map(r=>[r.id,normalized([r.name,r.description,r.url||'',r.entry||'',...(r.path||[]),...(r.modules||[]).map(n=>`${n} ${String(n).padStart(2,'0')} ${modules[n]||''}`),...(r.categories||[]).map(c=>categoryMap[c]?.name||'')].join(' '))]));
-  const matches=r=>normalized(state.query).split(' ').filter(Boolean).every(t=>index.get(r.id).includes(t));
+  const abbreviations=new Map(all.map(r=>[r.id,initials(r.name)]));
+  const nameIndex=new Map(all.map(r=>[r.id,normalized(r.name+' '+(r.aliases||[]).join(' '))]));
+  const matches=r=>normalized(state.query).split(' ').filter(Boolean).every(t=>/^[a-z]{2,3}$/.test(t)?nameIndex.get(r.id).includes(t)||abbreviations.get(r.id).includes(t):index.get(r.id).includes(t)||(/^[a-z]{4,}$/.test(t)&&abbreviations.get(r.id).includes(t)));
   const siteKey=r=>r.url?r.url.replace(/^https?:\/\/(www\.)?/,'').replace(/\/$/,''):r.id;
   const unique=all.filter((r,i,a)=>a.findIndex(x=>siteKey(x)===siteKey(r))===i);
   const symbols={academic:'▧',government:'▥',learning:'▱',ai:'✧',systems:'⌕',retrieval:'≡',knowledge:'▤',writing:'✎',research:'◇',campus:'⌂'},types={website:'网站工具',course:'课程资料',document:'政策文档'};
@@ -63,6 +68,7 @@
     if(view==='bookmarks'){if(state.folder==='loose'){rows=loose.map(n=>bookMap.get(n.id)).filter(matches);label='独立网页';}else if(folderMap.has(state.folder)){rows=descendants(folderMap.get(state.folder)).filter(matches);label=folderMap.get(state.folder).name;}else{state.folder='all';rows=bookEntries.filter(matches);label='全部收藏夹';}const sections=[];if(state.folder==='all'||state.folder==='loose'){const nodes=loose.filter(n=>matches(bookMap.get(n.id)));if(nodes.length){const section=el('section','bookmark-group'),head=el('div','bookmark-heading');head.append(el('h3','','独立网页'),el('span','',`${nodes.length} 个入口 · 未归入文件夹`));const grid=el('div','shortcut-grid');grid.append(...nodes.map(n=>shortcut(bookMap.get(n.id))));section.append(head,grid);sections.push(section);}}const folders=state.folder==='all'?rootFolders:folderMap.has(state.folder)?[folderMap.get(state.folder)]:[];folders.forEach(f=>{const section=bookmarkGroup(f);if(section)sections.push(section);});$('bookmark-groups').replaceChildren(...sections);}
     else if(view==='resources'){rows=[...library,...apps].filter(r=>(state.category==='all'||r.categories.includes(state.category))&&(state.kind==='all'||r.kind===state.kind)&&(state.module==='all'||r.modules.includes(Number(state.module)))&&matches(r));label=state.category==='all'?'全部资源':categoryMap[state.category].name;}else{rows=unique.filter(matches);label='全站入口';}
     if(view!=='bookmarks')$('resource-grid').replaceChildren(...rows.map(card));$('results-title').textContent=query?label+' · 搜索结果':label;$('result-count').textContent=rows.length;$('breadcrumb-category').textContent=view==='home'?'检索主页':label;$('results-status').textContent=`找到 ${rows.length} 个资源入口`;$('empty-state').hidden=rows.length!==0;const filtered=query||(view==='resources'&&(state.category!=='all'||state.kind!=='all'||state.module!=='all'))||(view==='bookmarks'&&state.folder!=='all');$('active-filters').hidden=!filtered;$('filter-summary').textContent=[view==='bookmarks'&&state.folder!=='all'?label:'',view==='resources'&&state.category!=='all'?label:'',state.kind!=='all'?types[state.kind]:'',state.module!=='all'?`模块 ${state.module.padStart(2,'0')}`:'',query?`“${state.query}”`:''].filter(Boolean).join(' · ');
+    const relatedBox=$('related-section');if(view==='home'&&query&&state.engine==='local'&&rows.length){const categories=new Set(rows.slice(0,6).flatMap(r=>r.categories||[]));const used=new Set(rows.map(siteKey));const suggestions=unique.filter(r=>r.url&&!used.has(siteKey(r))&&(r.categories||[]).some(c=>categories.has(c))).slice(0,4);relatedBox.hidden=!suggestions.length;$('related-grid').replaceChildren(...suggestions.map(shortcut));}else{relatedBox.hidden=true;$('related-grid').replaceChildren();}
   }
   function reset(){Object.assign(state,{query:'',category:'all',folder:'all',kind:'all',module:'all'});$('search').value='';$('kind-filter').value='all';$('module-filter').value='all';renderNav();render();if(view!=='home')updateUrl();}
   function renderEngine(){document.querySelectorAll('[data-engine]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.engine===state.engine)));$('search-submit').replaceChildren(document.createTextNode(view==='home'&&state.engine!=='local'?'搜索 ↗':'找入口'),el('span','','↵'));}

@@ -60,6 +60,17 @@ class CtrlTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 selected_models({'models': invalid})
 
+    def test_external_health_site_gets_provincial_and_national_catalog_alternatives(self):
+        raw = json.dumps({'keywords': ['卫生健康政策'], 'sites': [
+            {'name': '某市卫生健康局', 'url': 'https://health.example.org/',
+             'query': '卫生健康政策'}]}, ensure_ascii=False)
+        result = parse_route(raw, '福建省卫生健康政策应该到哪里核对？')
+        self.assertTrue(result['sites'][0]['unlisted'])
+        known = [site for site in result['sites'] if not site['unlisted']]
+        self.assertGreaterEqual(len(known), 2)
+        self.assertIn('https://wjw.fujian.gov.cn/', [site['url'] for site in known])
+        self.assertIn('https://www.nhc.gov.cn/', [site['url'] for site in known])
+
     def test_dual_screenshot_ocr_then_route_and_independent_answer(self):
         providers = {name: FakeProvider(name) for name in ('gemini', 'deepseek')}
         jobs = server.Jobs(providers)

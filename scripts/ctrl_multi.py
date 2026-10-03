@@ -125,7 +125,7 @@ class MultiCtrlJobs:
                 model['receipt'] = result.get('cleanup_receipt')
             if result.get('status') != 'completed':
                 raise RuntimeError(result.get('detail') or '关键词和网站未完成')
-            model['route'] = parse_route(result.get('text', ''))
+            model['route'] = parse_route(result.get('text', ''), model['original'])
             self._mark(job_id, name, state='completed', stage='关键词和网站已返回',
                        original=model['original'], route=model['route'], completed_at=time.time())
         except Exception as exc:
