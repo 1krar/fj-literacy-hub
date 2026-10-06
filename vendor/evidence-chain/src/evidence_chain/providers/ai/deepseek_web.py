@@ -1,10 +1,12 @@
 """Visible DeepSeek website calls with a dedicated persistent login profile."""
 
 from pathlib import Path
+import json
 import os
 import re
 import time
 from urllib.parse import urlparse
+from urllib.request import urlopen
 from uuid import uuid4
 
 from evidence_chain.providers.ai.gemini_web import (
@@ -27,6 +29,26 @@ class DeepSeekWebProvider(GeminiWebProvider):
 
 class DeepSeekBrowserTransport(GeminiBrowserTransport):
     home_url = DEEPSEEK_URL
+
+    def _wake_gemini_pages(self):
+        """Wake existing DeepSeek tabs after a CDP attach timeout."""
+        try:
+            with urlopen(self.cdp_url+'/json/list', timeout=2) as response:
+                targets = json.load(response)
+            activated = False
+            for target in targets[:50]:
+                parsed = urlparse(target.get('url', ''))
+                target_id = target.get('id', '')
+                if (target.get('type') != 'page' or parsed.scheme != 'https'
+                        or parsed.hostname != 'chat.deepseek.com'
+                        or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', target_id)):
+                    continue
+                with urlopen(self.cdp_url+'/json/activate/'+target_id, timeout=2) as response:
+                    response.read(100)
+                activated = True
+            return activated
+        except (OSError, ValueError, TypeError):
+            return False
 
     def start_browser(self):
         result=super().start_browser()
@@ -51,7 +73,7 @@ class DeepSeekBrowserTransport(GeminiBrowserTransport):
         from playwright.sync_api import Error
         if not self._listening():return dict(status='unavailable',detail='尚未打开 DeepSeek 专用窗口')
         try:
-            with self._connection() as browser:
+            with self._connection(wake=True) as browser:
                 pages=[p for c in browser.contexts for p in c.pages if urlparse(p.url).hostname=='chat.deepseek.com']
                 for page in reversed(pages):
                     state=self._page_state(page)
@@ -82,7 +104,7 @@ class DeepSeekBrowserTransport(GeminiBrowserTransport):
             launched=self.start_browser()
             if launched['status']!='window_opened':return launched
         try:
-            with self._connection() as browser:
+            with self._connection(wake=True) as browser:
                 if not browser.contexts:return dict(status='unavailable',detail='DeepSeek 浏览器无可用会话')
                 page=self._new_task_page(browser)
                 page.set_default_timeout(4000)
@@ -97,6 +119,8 @@ class DeepSeekBrowserTransport(GeminiBrowserTransport):
                 if state['status']!='ready':return state
                 if page.locator('.ds-markdown').count():
                     return dict(status='error',detail='新会话含旧回答，未发送；请检查 DeepSeek 窗口')
+                if hasattr(progress, 'bind_page'):
+                    progress.bind_page(page)
                 if image_path:
                     progress('正在上传题目图片至 DeepSeek')
                     inputs = page.locator('input[type="file"]')
@@ -127,12 +151,18 @@ class DeepSeekBrowserTransport(GeminiBrowserTransport):
                     else:
                         return dict(status='timeout',detail='DeepSeek图片未确认上传完成，未发送题目；请检查原窗口')
                 editor=self._editor(page)
+                if hasattr(progress, 'before_send'):
+                    progress.before_send(page)
                 editor.fill(prompt)
                 editor.press('Enter')
+                if hasattr(progress, 'after_send'):
+                    progress.after_send(page)
                 progress('DeepSeek 已发送，等待完整回答')
                 tracker=FinalResponseTracker(2)
                 deadline=time.monotonic()+self.timeout_seconds
                 while time.monotonic()<deadline:
+                    if hasattr(progress, 'check'):
+                        progress.check(page)
                     state=self._page_state(page)
                     if state['status'] in {'login_required','human_required'}:return state
                     blocks=page.locator('.ds-markdown')
@@ -141,9 +171,12 @@ class DeepSeekBrowserTransport(GeminiBrowserTransport):
                     actions=(self._visible(blocks.last.locator('..').locator('..').get_by_role('button',name=re.compile('^(朗读|Read aloud)$',re.I)))
                         if blocks.count() else None)
                     if tracker.observe(text,actions is not None,stop is not None,time.monotonic()):
+                        if hasattr(progress, 'check'):
+                            progress.check(page)
                         return dict(status='completed',text=text,conversation_url=page.url,
                             model='DeepSeek Web (website-selected model)')
                     page.wait_for_timeout(500)
                 return dict(status='timeout',detail='DeepSeek 未确认完整回复；保留页面，未自动重发')
         except (TimeoutError,Error,BrowserUnavailable):
             return dict(status='error',detail='DeepSeek 网页操作未完成；请检查原窗口，未自动重发')
+

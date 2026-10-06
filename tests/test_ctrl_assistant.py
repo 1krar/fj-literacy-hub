@@ -11,7 +11,7 @@ spec = importlib.util.spec_from_file_location('assistant_server_for_ctrl', ROOT 
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
 from ctrl_assistant import CATALOG, parse_route, route_prompt
-from ctrl_multi import MultiCtrlJobs, selected_models
+from ctrl_multi import ConversationChanged, CtrlProgress, MultiCtrlJobs, selected_models
 
 
 class FakeProvider:
@@ -176,7 +176,7 @@ class CtrlTests(unittest.TestCase):
                          ('gemini.google.com', '/app/chat-123'))
         ctrl.jobs.pool.shutdown(wait=True)
 
-    def test_conversation_locator_restores_saved_url_without_changing_other_chat(self):
+    def test_conversation_locator_restores_saved_url_in_original_tab(self):
         from types import SimpleNamespace
         provider = FakeProvider('deepseek')
         provider._transport = SimpleNamespace(_page_state=lambda page: {'status': 'ready'})
@@ -184,18 +184,91 @@ class CtrlTests(unittest.TestCase):
             'deepseek': provider}), server.read_input)
         old_url = 'https://chat.deepseek.com/a/chat/s/original-123'
         changed = SimpleNamespace(url='https://chat.deepseek.com/a/chat/s/another-456', target='saved-tab')
-        restored = SimpleNamespace(url='', target='restored-tab')
-        restored.goto = lambda url, **kwargs: setattr(restored, 'url', url)
-        context = SimpleNamespace(pages=[changed], new_page=lambda: restored)
+        changed.goto = lambda url, **kwargs: setattr(changed, 'url', url)
+        context = SimpleNamespace(pages=[changed])
         browser = SimpleNamespace(contexts=[context])
         ctrl._find_page = lambda browser, target: changed
         ctrl._page_target_id = lambda page: page.target
         owned = {'target_id': 'saved-tab', 'url': old_url}
-        self.assertIs(ctrl._locate_conversation(browser, 'deepseek', owned), restored)
-        self.assertEqual(owned['target_id'], 'restored-tab')
-        self.assertEqual(changed.url, 'https://chat.deepseek.com/a/chat/s/another-456')
+        self.assertIs(ctrl._locate_conversation(browser, 'deepseek', owned), changed)
+        self.assertEqual(owned['target_id'], 'saved-tab')
+        self.assertEqual(changed.url, old_url)
         ctrl.jobs.pool.shutdown(wait=True)
+
+    def test_bound_page_rejects_other_conversation_reply(self):
+        from types import SimpleNamespace
+        ctrl = MultiCtrlJobs(server.Jobs({'gemini': FakeProvider('gemini'),
+            'deepseek': FakeProvider('deepseek')}), server.read_input)
+        page = SimpleNamespace(url='https://chat.deepseek.com/a/chat/s/wrong-456')
+        owned = {'target_id': 'same-tab', 'url': 'https://chat.deepseek.com/a/chat/s/wrong-456',
+                 'bound_url': 'https://chat.deepseek.com/a/chat/s/correct-123'}
+        with self.assertRaises(ConversationChanged):
+            ctrl._assert_bound_conversation('deepseek', page, owned)
+        ctrl.jobs.pool.shutdown(wait=True)
+
+    def test_initial_reply_guard_requires_matching_submitted_message(self):
+        from types import SimpleNamespace
+        provider = FakeProvider('deepseek')
+        transport = SimpleNamespace(_editor=lambda page: SimpleNamespace(evaluate=lambda script: ''),
+                                    _last_request_receipt='receipt', _owned_targets={'receipt': {}})
+        provider._transport = transport
+        jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': provider})
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        ctrl.jobs.items['j'] = {'results': {'deepseek': {}}}
+        model = {}
+        guard = CtrlProgress(ctrl, 'j', 'deepseek', model)
+        page = SimpleNamespace(url='https://chat.deepseek.com/', wait_for_timeout=lambda ms: None,
+                               evaluate=lambda script, marker: marker == guard.marker)
+        guard.bind_page(page)
+        guard.before_send(page)
+        page.url = 'https://chat.deepseek.com/a/chat/s/original-123'
+        guard.after_send(page)
+        self.assertEqual(model['conversation_url'], page.url)
+        page.url = 'https://chat.deepseek.com/a/chat/s/another-456'
+        with self.assertRaises(ConversationChanged):
+            guard.check(page)
+        jobs.pool.shutdown(wait=True)
+
+    def test_ocr_and_direct_answer_never_accept_switched_chat_reply(self):
+        from types import SimpleNamespace
+        class SwitchedProvider(FakeProvider):
+            def __init__(inner):
+                super().__init__('deepseek')
+                inner._transport = SimpleNamespace(_last_request_receipt=None, _owned_targets={},
+                    _editor=lambda page: SimpleNamespace(evaluate=lambda script: ''))
+            def generate_with_progress(inner, prompt, path, progress):
+                receipt = 'owned-tab'
+                inner._transport._last_request_receipt = receipt
+                inner._transport._owned_targets[receipt] = {'target_id': 'tab', 'url': 'https://chat.deepseek.com/'}
+                page = SimpleNamespace(url='https://chat.deepseek.com/', wait_for_timeout=lambda ms: None,
+                                       evaluate=lambda script, marker: marker in prompt)
+                progress.bind_page(page)
+                progress.before_send(page)
+                page.url = 'https://chat.deepseek.com/a/chat/s/our-chat'
+                progress.after_send(page)
+                page.url = 'https://chat.deepseek.com/a/chat/s/other-chat'
+                return {'status': 'completed', 'text': '错误对话的答案',
+                        'conversation_url': page.url, 'cleanup_receipt': receipt}
+        provider = SwitchedProvider()
+        jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': provider})
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        image = 'data:image/png;base64,'+base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()
+        started = ctrl.start({'image': image, 'models': ['deepseek']})
+        jobs.pool.shutdown(wait=True)
+        result = jobs.get(started['id'])['results']['deepseek']
+        self.assertEqual(result['state'], 'failed')
+        self.assertFalse(result.get('original'))
+        self.assertIn('另一段', result['error'])
+        ctrl.sessions[started['session']]['original'] = '我们的题目'
+        ctrl.sessions[started['session']]['models']['deepseek']['receipt'] = None
+        jobs.pool = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=1)
+        answered = ctrl.answer({'session': started['session'], 'models': ['deepseek']})
+        jobs.pool.shutdown(wait=True)
+        answer = jobs.get(answered['id'])['results']['deepseek']
+        self.assertEqual(answer['state'], 'failed')
+        self.assertNotIn('answer', answer)
 
 
 if __name__ == '__main__':
     unittest.main()
+

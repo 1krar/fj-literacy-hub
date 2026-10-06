@@ -209,7 +209,11 @@ class GeminiBrowserTransport:
                 for receipt, page in self._tracking_pages.items():
                     try:
                         if receipt in self._owned_targets:
-                            self._owned_targets[receipt]['url'] = page.url
+                            owned = self._owned_targets[receipt]
+                            if owned.get('bound_url'):
+                                owned['url'] = owned['bound_url']
+                            elif not owned.get('guarded'):
+                                owned['url'] = page.url
                     except Error:
                         pass
                 self._tracking_pages.clear()
@@ -336,6 +340,8 @@ class GeminiBrowserTransport:
                     page.wait_for_timeout(250)
                 if state["status"] != "ready":
                     return state
+                if hasattr(progress, 'bind_page'):
+                    progress.bind_page(page)
                 # A fresh /app tab prevents old conversation answers becoming this result.
                 previous_response_count = page.locator("model-response").count()
                 if image_path:
@@ -384,6 +390,8 @@ class GeminiBrowserTransport:
                     send = page.get_by_role('button', name=re.compile(r'^(Send|Send message|Submit|发送|提交|傳送)(訊息|消息)?$', re.I)).first
                     send.wait_for(state='visible', timeout=60000)
                 stage = '提交题目（若超时，先检查原页面，勿重复提交）'
+                if hasattr(progress, 'before_send'):
+                    progress.before_send(page)
                 page.bring_to_front()
                 previous_queries = page.locator('user-query').count()
                 if send is not None and image_path:
@@ -396,9 +404,11 @@ class GeminiBrowserTransport:
                     (document.querySelectorAll('user-query').length > counts.queries &&
                     [...document.querySelectorAll('[contenteditable="true"]')].every(e => !e.textContent.trim()))
                 """, arg={'responses':previous_response_count,'queries':previous_queries}, timeout=15000)
+                if hasattr(progress, 'after_send'):
+                    progress.after_send(page)
                 progress('已发送，等待 AI 回复完毕')
                 stage = '等待 Gemini 回复'
-                result = self._await_response(page, previous_response_count)
+                result = self._await_response(page, previous_response_count, progress=progress)
                 return result
         except PlaywrightTimeout:
             return {"status": "timeout", "detail": f"Gemini 网页超时：{stage}；请检查专用浏览器，未自动重发"}
@@ -469,11 +479,13 @@ class GeminiBrowserTransport:
             page.wait_for_timeout(250)
         return False
 
-    def _await_response(self, page, previous_response_count: int = 0) -> dict[str, Any]:
+    def _await_response(self, page, previous_response_count: int = 0, progress=None) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_seconds
         stable = FinalResponseTracker()
         partial = ""
         while time.monotonic() < deadline:
+            if hasattr(progress, 'check'):
+                progress.check(page)
             state = self._page_state(page)
             if state["status"] in {"login_required", "human_required", "rate_limited"}:
                 return state
@@ -487,6 +499,8 @@ class GeminiBrowserTransport:
                 actions = self._visible(block.get_by_role("button", name=re.compile(r"copy|复制|複製|good response|bad response|回答得好|回答得不好", re.I)))
                 stop = self._visible(page.get_by_role("button", name=re.compile(r"stop response|stop generating|停止回答|停止生成", re.I)))
                 if stable.observe(partial, actions is not None, stop is not None, time.monotonic()):
+                    if hasattr(progress, 'check'):
+                        progress.check(page)
                     return {"status": "completed", "text": partial, "conversation_url": page.url,
                             "model": "Gemini Web (website-selected model)", "detail": "Response completion controls detected"}
             page.wait_for_timeout(500)
@@ -509,3 +523,4 @@ class FinalResponseTracker:
             self._text, self._since = text, now
             return False
         return now - self._since >= self.stable_seconds
+

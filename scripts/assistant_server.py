@@ -52,7 +52,10 @@ def read_input(data):
 
 def load_provider(evidence_root):
     # Namespace packages avoid importing the unrelated evidence pipeline.
-    ai = evidence_root / 'src/evidence_chain/providers/ai'
+    # Use the bundled, tested adapters while retaining the existing browser
+    # profiles under evidence_root, so current Edge logins are reused.
+    bundled = ROOT / 'vendor/evidence-chain/src/evidence_chain/providers/ai'
+    ai = bundled if bundled.is_dir() else evidence_root / 'src/evidence_chain/providers/ai'
     for name, folder in [('evidence_chain', ai.parents[1]), ('evidence_chain.providers', ai.parent), ('evidence_chain.providers.ai', ai)]:
         if name not in sys.modules:
             package = types.ModuleType(name)
@@ -68,7 +71,12 @@ def load_provider(evidence_root):
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        loaded[name] = getattr(module, cls)(profile_dir=evidence_root / '.runtime/gemini-browser') if name == 'gemini' else getattr(module, cls)()
+        if name == 'gemini':
+            loaded[name] = getattr(module, cls)(profile_dir=evidence_root / '.runtime/gemini-browser')
+        else:
+            endpoint = os.environ.get('EVIDENCE_CHAIN_DEEPSEEK_CDP_URL', 'http://127.0.0.1:9231')
+            transport = module.DeepSeekBrowserTransport(endpoint, evidence_root / '.runtime/deepseek-browser', 180)
+            loaded[name] = getattr(module, cls)(transport=transport)
     return loaded
 
 
@@ -320,3 +328,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

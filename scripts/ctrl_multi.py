@@ -1,8 +1,10 @@
 """Parallel CTRL workflows, preserving one browser conversation per model."""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 import re
+import secrets
 import tempfile
 import time
 import uuid
@@ -10,6 +12,75 @@ import uuid
 from ctrl_assistant import OCR_PROMPT, ANSWER_PROMPT, ROOT, parse_route, route_prompt
 
 MODELS = ('deepseek', 'gemini')
+
+
+class ConversationChanged(RuntimeError):
+    """The visible page no longer proves it contains this request."""
+
+
+class CtrlProgress:
+    """Bind a fresh model request to its exact chat before accepting output."""
+
+    def __init__(self, owner, job_id, name, model):
+        self.owner, self.job_id, self.name, self.model = owner, job_id, name, model
+        self.marker = 'CTRL-' + secrets.token_hex(6)
+        self.initial_url = None
+        self.key = None
+
+    def prompt(self, value):
+        return value + '\n[校验码 ' + self.marker + '，不属于题目]'
+
+    def __call__(self, stage):
+        self.owner._mark(self.job_id, self.name, stage=stage)
+
+    def bind_page(self, page):
+        self.initial_url = page.url
+        transport = self.owner.providers[self.name]._transport
+        owned = transport._owned_targets.get(transport._last_request_receipt)
+        if owned:
+            owned['guarded'] = True
+            owned['url'] = page.url
+
+    def before_send(self, page):
+        initial = self.owner._conversation_key(self.name, self.initial_url)
+        current = self.owner._conversation_key(self.name, page.url)
+        if self.initial_url and (current != initial or (not initial and page.url != self.initial_url)):
+            raise ConversationChanged('提交前模型标签已切换对话；未向其他对话发题')
+
+    def after_send(self, page):
+        # A unique marker in the submitted user message prevents binding to a
+        # different conversation if navigation happens immediately after send.
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            key = self.owner._conversation_key(self.name, page.url)
+            if key:
+                submitted = page.evaluate("""marker => {
+                    const body = document.body;
+                    if (!body || !body.textContent.includes(marker)) return false;
+                    return !Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+                        .some(el => el.getClientRects().length &&
+                            (el.value ?? el.textContent ?? '').includes(marker));
+                }""", self.marker)
+                if submitted:
+                    self.key = key
+                    self.model['conversation_url'] = page.url
+                    transport = self.owner.providers[self.name]._transport
+                    owned = transport._owned_targets.get(transport._last_request_receipt)
+                    if owned:
+                        owned['bound_url'] = page.url
+                        owned['url'] = page.url
+                    return
+            page.wait_for_timeout(100)
+        raise ConversationChanged('发送后未能确认本次消息所在的原对话；未采纳网页回复，请检查模型窗口')
+
+    def check(self, page):
+        if not self.key or self.owner._conversation_key(self.name, page.url) != self.key:
+            raise ConversationChanged('模型标签已切换到另一段对话；未采纳该页面回复，请返回原对话后重试')
+
+    def confirm_result(self, result):
+        if (result.get('status') == 'completed' and
+                self.owner._conversation_key(self.name, result.get('conversation_url')) != self.key):
+            raise ConversationChanged('模型回复来自另一段或无法确认的对话；未采纳该回复')
 
 
 def selected_models(data):
@@ -106,15 +177,20 @@ class MultiCtrlJobs:
         model = self.sessions[session_id]['models'][name]
         provider = self.providers[name]
         try:
+            progress = CtrlProgress(self, job_id, name, model)
+            model['guarded'] = hasattr(provider, '_transport')
             if path:
                 model['phase'] = 'ocr'
                 self._mark(job_id, name, stage='正在 OCR 识别截图')
-                result = provider.generate_with_progress(OCR_PROMPT, path,
-                    lambda stage: self._mark(job_id, name, stage=stage))
+                result = provider.generate_with_progress(progress.prompt(OCR_PROMPT), path, progress)
                 model['receipt'] = result.get('cleanup_receipt')
+                if model['guarded'] and not progress.key:
+                    raise ConversationChanged('未确认截图 OCR 所属对话；未采纳回复')
+                if model['guarded']:
+                    progress.confirm_result(result)
                 if result.get('status') != 'completed' or not result.get('text', '').strip():
                     raise RuntimeError(result.get('detail') or '截图 OCR 未完成；请检查模型窗口')
-                model['original'] = result['text'].strip()[:10000]
+                model['original'] = result['text'].replace(progress.marker, '').strip()[:10000]
                 model['receipt'] = result.get('cleanup_receipt')
                 model['phase'] = 'ocr_done'
                 with self.jobs.lock:
@@ -126,9 +202,13 @@ class MultiCtrlJobs:
                 model['original'] = text
                 model['phase'] = 'route'
                 self._mark(job_id, name, original=text, stage='正在提取关键词和网站')
-                result = provider.generate_with_progress('原题：\n'+text+'\n\n'+route_prompt(text), None,
-                    lambda stage: self._mark(job_id, name, stage=stage))
+                result = provider.generate_with_progress(progress.prompt('原题：\n'+text+'\n\n'+route_prompt(text)),
+                    None, progress)
                 model['receipt'] = result.get('cleanup_receipt')
+                if model['guarded'] and not progress.key:
+                    raise ConversationChanged('未确认检索建议所属对话；未采纳回复')
+                if model['guarded']:
+                    progress.confirm_result(result)
             if result.get('status') != 'completed':
                 raise RuntimeError(result.get('detail') or '关键词和网站未完成')
             model['route'] = parse_route(result.get('text', ''), model['original'])
@@ -136,6 +216,10 @@ class MultiCtrlJobs:
             self._mark(job_id, name, state='completed', stage='关键词和网站已返回',
                        original=model['original'], route=model['route'], completed_at=time.time())
         except Exception as exc:
+            transport = getattr(provider, '_transport', None)
+            receipt = getattr(transport, '_last_request_receipt', None)
+            if receipt and receipt in getattr(transport, '_owned_targets', {}):
+                model['receipt'] = receipt
             self._mark(job_id, name, state='failed', stage='本模型未完成',
                        original=model['original'], error=str(exc)[:400], completed_at=time.time())
 
@@ -169,7 +253,8 @@ class MultiCtrlJobs:
 
     def _locate_conversation(self, browser, name, owned):
         """Bind to the saved chat, even when the user moved it to another tab."""
-        expected = self._conversation_key(name, owned.get('url'))
+        saved_url = owned.get('bound_url') or owned.get('url')
+        expected = self._conversation_key(name, saved_url)
         current = self._find_page(browser, owned['target_id'])
         hostname = 'chat.deepseek.com' if name == 'deepseek' else 'gemini.google.com'
         if current and urlsplit(current.url).hostname == hostname:
@@ -184,32 +269,31 @@ class MultiCtrlJobs:
                     # This may be a tab opened by the user. Use it for this
                     # request, but never reassign the cleanup receipt to it.
                     return page
-        # The task tab may now show another chat. Open the saved chat in a new
-        # tab instead of navigating away from the user's current conversation.
-        if not browser.contexts:
+        # Reuse the original tab. Some model sites challenge a freshly opened
+        # tab even in the same browser profile; the user approved this return.
+        if not current:
             return None
-        restored = browser.contexts[0].new_page()
         try:
-            restored.goto(owned['url'], wait_until='domcontentloaded', timeout=20000)
+            current.goto(saved_url, wait_until='domcontentloaded', timeout=20000)
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                if self._conversation_key(name, restored.url) == expected:
-                    state = self.providers[name]._transport._page_state(restored)
+                if self._conversation_key(name, current.url) == expected:
+                    state = self.providers[name]._transport._page_state(current)
                     if state['status'] == 'ready':
-                        owned['target_id'] = self._page_target_id(restored)
-                        return restored
+                        return current
                     if state['status'] in ('login_required', 'human_required'):
                         raise RuntimeError(state.get('detail') or '模型窗口需要登录或验证')
-                restored.wait_for_timeout(250)
+                current.wait_for_timeout(250)
         except RuntimeError:
-            restored.close()
             raise
         except Exception:
             pass
-        restored.close()
-        if current:
-            raise RuntimeError('已切换模型对话，但保存的原对话暂时打不开；未向其他对话发题，也未自动重发')
-        return None
+        raise RuntimeError('原对话暂时打不开；未采纳其他对话回复，也未自动重发')
+
+    def _assert_bound_conversation(self, name, page, owned):
+        expected = self._conversation_key(name, owned.get('bound_url') or owned.get('url'))
+        if not expected or self._conversation_key(name, page.url) != expected:
+            raise ConversationChanged('模型标签已切换到另一段对话；未采纳该页面回复，请点重试返回原对话')
 
     def _continue(self, name, model, prompt, job_id):
         from playwright.sync_api import Error, TimeoutError as PlaywrightTimeout
@@ -220,12 +304,15 @@ class MultiCtrlJobs:
         owned = transport._owned_targets.get(receipt)
         if not owned:
             raise RuntimeError('原模型对话已丢失，请重新提交题目')
+        if model.get('guarded') and not owned.get('bound_url'):
+            raise ConversationChanged('原对话地址未确认，未向其他对话发送追问')
         with provider._lock:
             try:
-                with transport._connection() as browser:
+                with transport._connection(wake=True) as browser:
                     page = self._locate_conversation(browser, name, owned)
                     if not page:
                         raise RuntimeError('未能定位原模型对话；请检查原窗口后重试')
+                    self._assert_bound_conversation(name, page, owned)
                     page.set_default_timeout(5000)
                     state = transport._page_state(page)
                     if state['status'] != 'ready':
@@ -244,16 +331,20 @@ class MultiCtrlJobs:
                         send = transport._visible(page.get_by_role('button', name=re.compile(
                             r'^(Send|Send message|Submit|发送|提交|傳送)(訊息|消息)?$', re.I)))
                         transport._submit_once(editor, send)
+                    self._assert_bound_conversation(name, page, owned)
                     model['phase'] = 'answer_sent' if prompt == ANSWER_PROMPT else 'route_sent'
                     self._mark(job_id, name, stage='已在同一对话追问，等待完整回复')
                     if name == 'gemini':
-                        result = transport._await_response(page, before)
+                        result = transport._await_response(page, before,
+                            progress=SimpleNamespace(check=lambda current: self._assert_bound_conversation(name, current, owned)))
                         if result.get('status') != 'completed':
                             raise RuntimeError(result.get('detail') or 'Gemini 回复未确认完成')
+                        self._assert_bound_conversation(name, page, owned)
                         return result
                     tracker = FinalResponseTracker(1)
                     deadline = time.monotonic() + 150
                     while time.monotonic() < deadline:
+                        self._assert_bound_conversation(name, page, owned)
                         if transport._page_state(page)['status'] != 'ready':
                             raise RuntimeError('DeepSeek 页面需要登录或人工验证')
                         blocks = page.locator('.ds-markdown')
@@ -263,6 +354,7 @@ class MultiCtrlJobs:
                             stop = transport._visible(page.get_by_role('button', name=re.compile('停止|Stop', re.I)))
                             actions = transport._visible(block.locator('..').locator('..').get_by_role('button', name=re.compile('^(朗读|Read aloud)$', re.I)))
                             if tracker.observe(answer, actions is not None, stop is not None, time.monotonic()):
+                                self._assert_bound_conversation(name, page, owned)
                                 return {'status': 'completed', 'text': answer}
                         page.wait_for_timeout(350)
                     raise RuntimeError('DeepSeek 回复未确认完成；原对话已保留，未自动重发')
@@ -294,10 +386,16 @@ class MultiCtrlJobs:
             else:
                 original = session['original']
                 model['phase'] = 'answer'
-                result = self.providers[name].generate_with_progress('原题：\n'+original+'\n\n'+ANSWER_PROMPT,
-                    None, lambda stage: self._mark(job_id, name, stage=stage))
+                progress = CtrlProgress(self, job_id, name, model)
+                model['guarded'] = hasattr(self.providers[name], '_transport')
+                result = self.providers[name].generate_with_progress(
+                    progress.prompt('原题：\n'+original+'\n\n'+ANSWER_PROMPT), None, progress)
                 model['original'] = original
                 model['receipt'] = result.get('cleanup_receipt')
+                if model['guarded'] and not progress.key:
+                    raise ConversationChanged('未确认直接作答所属对话；未采纳回复')
+                if model['guarded']:
+                    progress.confirm_result(result)
             if result.get('status') != 'completed' or not result.get('text', '').strip():
                 raise RuntimeError(result.get('detail') or '模型未返回完整答案')
             model['answer'] = result['text'].strip()[:12000]
@@ -305,6 +403,10 @@ class MultiCtrlJobs:
             self._mark(job_id, name, state='completed', stage='答案已返回',
                        answer=model['answer'], completed_at=time.time())
         except Exception as exc:
+            transport = getattr(self.providers[name], '_transport', None)
+            receipt = getattr(transport, '_last_request_receipt', None)
+            if receipt and receipt in getattr(transport, '_owned_targets', {}):
+                model['receipt'] = receipt
             self._mark(job_id, name, state='failed', stage='作答未完成',
                        error=str(exc)[:400], completed_at=time.time())
 
@@ -346,9 +448,11 @@ class MultiCtrlJobs:
         owned = transport._owned_targets.get(model.get('receipt'))
         if not owned:
             return None
+        if model.get('guarded') and not owned.get('bound_url'):
+            raise ConversationChanged('本次发送后未能确认原对话地址；无法安全读取，请重新提交题目')
         with provider._lock:
             try:
-                connection = transport._connection()
+                connection = transport._connection(wake=True)
                 browser = connection.__enter__()
             except BrowserUnavailable:
                 return None
@@ -360,6 +464,7 @@ class MultiCtrlJobs:
                 tracker = FinalResponseTracker(1)
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:
+                    self._assert_bound_conversation(name, page, owned)
                     state = transport._page_state(page)
                     if state['status'] != 'ready':
                         raise RuntimeError(state.get('detail') or '原模型网页尚未就绪')
@@ -378,6 +483,7 @@ class MultiCtrlJobs:
                         stop = transport._visible(page.get_by_role('button', name=re.compile(
                             '停止|Stop|stop response|stop generating', re.I)))
                         if tracker.observe(answer, actions is not None, stop is not None, time.monotonic()):
+                            self._assert_bound_conversation(name, page, owned)
                             return answer
                     page.wait_for_timeout(350)
                 raise RuntimeError('原对话仍在，但尚未确认完整回复；请稍后再点重试，未重复发送')
@@ -456,3 +562,4 @@ class MultiCtrlJobs:
         return {'original': session['original'],
                 'models': {name: {key: model[key] for key in ('original', 'route', 'answer')}
                            for name, model in session['models'].items()}}
+
