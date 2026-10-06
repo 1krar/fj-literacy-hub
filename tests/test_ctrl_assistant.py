@@ -155,6 +155,47 @@ class CtrlTests(unittest.TestCase):
         self.assertEqual(jobs.get(retried['id'])['state'], 'completed')
         self.assertEqual(len(provider.calls), 0)
 
+    def test_conversation_locator_ignores_changed_tab_and_finds_original_chat(self):
+        from types import SimpleNamespace
+        ctrl = MultiCtrlJobs(server.Jobs({'gemini': FakeProvider('gemini'),
+            'deepseek': FakeProvider('deepseek')}), server.read_input)
+        old_url = 'https://chat.deepseek.com/a/chat/s/original-123'
+        changed = SimpleNamespace(url='https://chat.deepseek.com/a/chat/s/another-456', target='saved-tab')
+        found = SimpleNamespace(url=old_url, target='other-tab')
+        browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[changed, found])])
+        ctrl._find_page = lambda browser, target: next((page for page in browser.contexts[0].pages
+            if page.target == target), None)
+        ctrl._page_target_id = lambda page: page.target
+        owned = {'target_id': 'saved-tab', 'url': old_url}
+        self.assertIs(ctrl._locate_conversation(browser, 'deepseek', owned), found)
+        self.assertEqual(owned['target_id'], 'saved-tab')  # Never close a user-owned tab later.
+        self.assertIsNone(ctrl._conversation_key('deepseek', 'https://chat.deepseek.com/'))
+        self.assertIsNone(ctrl._conversation_key('deepseek', 'https://evil.example/a/chat/s/original-123'))
+        self.assertIsNone(ctrl._conversation_key('gemini', 'https://gemini.google.com/app'))
+        self.assertEqual(ctrl._conversation_key('gemini', 'https://gemini.google.com/app/chat-123'),
+                         ('gemini.google.com', '/app/chat-123'))
+        ctrl.jobs.pool.shutdown(wait=True)
+
+    def test_conversation_locator_restores_saved_url_without_changing_other_chat(self):
+        from types import SimpleNamespace
+        provider = FakeProvider('deepseek')
+        provider._transport = SimpleNamespace(_page_state=lambda page: {'status': 'ready'})
+        ctrl = MultiCtrlJobs(server.Jobs({'gemini': FakeProvider('gemini'),
+            'deepseek': provider}), server.read_input)
+        old_url = 'https://chat.deepseek.com/a/chat/s/original-123'
+        changed = SimpleNamespace(url='https://chat.deepseek.com/a/chat/s/another-456', target='saved-tab')
+        restored = SimpleNamespace(url='', target='restored-tab')
+        restored.goto = lambda url, **kwargs: setattr(restored, 'url', url)
+        context = SimpleNamespace(pages=[changed], new_page=lambda: restored)
+        browser = SimpleNamespace(contexts=[context])
+        ctrl._find_page = lambda browser, target: changed
+        ctrl._page_target_id = lambda page: page.target
+        owned = {'target_id': 'saved-tab', 'url': old_url}
+        self.assertIs(ctrl._locate_conversation(browser, 'deepseek', owned), restored)
+        self.assertEqual(owned['target_id'], 'restored-tab')
+        self.assertEqual(changed.url, 'https://chat.deepseek.com/a/chat/s/another-456')
+        ctrl.jobs.pool.shutdown(wait=True)
+
 
 if __name__ == '__main__':
     unittest.main()

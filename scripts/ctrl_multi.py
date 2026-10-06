@@ -142,13 +142,73 @@ class MultiCtrlJobs:
     def _find_page(self, browser, target_id):
         for context in browser.contexts:
             for page in context.pages:
-                cdp = context.new_cdp_session(page)
-                try:
-                    current = cdp.send('Target.getTargetInfo')['targetInfo']['targetId']
-                finally:
-                    cdp.detach()
-                if current == target_id:
+                if self._page_target_id(page) == target_id:
                     return page
+        return None
+
+    @staticmethod
+    def _page_target_id(page):
+        cdp = page.context.new_cdp_session(page)
+        try:
+            return cdp.send('Target.getTargetInfo')['targetInfo']['targetId']
+        finally:
+            cdp.detach()
+
+    @staticmethod
+    def _conversation_key(name, url):
+        """Only an actual conversation path can identify a chat, not a home URL."""
+        parts = urlsplit(url or '')
+        path = parts.path.rstrip('/')
+        if parts.scheme != 'https' or parts.username or parts.password:
+            return None
+        if name == 'deepseek' and parts.hostname == 'chat.deepseek.com' and re.fullmatch(r'/a/chat/s/[\w-]+', path):
+            return (parts.hostname, path)
+        if name == 'gemini' and parts.hostname == 'gemini.google.com' and re.fullmatch(r'/app/[\w-]+', path):
+            return (parts.hostname, path)
+        return None
+
+    def _locate_conversation(self, browser, name, owned):
+        """Bind to the saved chat, even when the user moved it to another tab."""
+        expected = self._conversation_key(name, owned.get('url'))
+        current = self._find_page(browser, owned['target_id'])
+        hostname = 'chat.deepseek.com' if name == 'deepseek' else 'gemini.google.com'
+        if current and urlsplit(current.url).hostname == hostname:
+            if (self._conversation_key(name, current.url) == expected and expected) or (
+                    not expected and current.url == owned.get('url')):
+                return current
+        if not expected:
+            return None
+        for context in browser.contexts:
+            for page in context.pages:
+                if self._conversation_key(name, page.url) == expected:
+                    # This may be a tab opened by the user. Use it for this
+                    # request, but never reassign the cleanup receipt to it.
+                    return page
+        # The task tab may now show another chat. Open the saved chat in a new
+        # tab instead of navigating away from the user's current conversation.
+        if not browser.contexts:
+            return None
+        restored = browser.contexts[0].new_page()
+        try:
+            restored.goto(owned['url'], wait_until='domcontentloaded', timeout=20000)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self._conversation_key(name, restored.url) == expected:
+                    state = self.providers[name]._transport._page_state(restored)
+                    if state['status'] == 'ready':
+                        owned['target_id'] = self._page_target_id(restored)
+                        return restored
+                    if state['status'] in ('login_required', 'human_required'):
+                        raise RuntimeError(state.get('detail') or '模型窗口需要登录或验证')
+                restored.wait_for_timeout(250)
+        except RuntimeError:
+            restored.close()
+            raise
+        except Exception:
+            pass
+        restored.close()
+        if current:
+            raise RuntimeError('已切换模型对话，但保存的原对话暂时打不开；未向其他对话发题，也未自动重发')
         return None
 
     def _continue(self, name, model, prompt, job_id):
@@ -163,10 +223,9 @@ class MultiCtrlJobs:
         with provider._lock:
             try:
                 with transport._connection() as browser:
-                    page = self._find_page(browser, owned['target_id'])
-                    hostname = 'chat.deepseek.com' if name == 'deepseek' else 'gemini.google.com'
-                    if not page or urlsplit(page.url).hostname != hostname:
-                        raise RuntimeError('原模型对话已关闭或切换网站，请重新提交题目')
+                    page = self._locate_conversation(browser, name, owned)
+                    if not page:
+                        raise RuntimeError('未能定位原模型对话；请检查原窗口后重试')
                     page.set_default_timeout(5000)
                     state = transport._page_state(page)
                     if state['status'] != 'ready':
@@ -294,9 +353,8 @@ class MultiCtrlJobs:
             except BrowserUnavailable:
                 return None
             try:
-                page = self._find_page(browser, owned['target_id'])
-                hostname = 'chat.deepseek.com' if name == 'deepseek' else 'gemini.google.com'
-                if not page or urlsplit(page.url).hostname != hostname:
+                page = self._locate_conversation(browser, name, owned)
+                if not page:
                     return None
                 blocks = page.locator('.ds-markdown' if name == 'deepseek' else 'model-response')
                 tracker = FinalResponseTracker(1)
