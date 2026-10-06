@@ -81,8 +81,8 @@ function failure(error,started,hadImage){recordFault('route',routeRequest?.model
 $('question').addEventListener('input',()=>{memory.set('draft',$('question').value);if($('pip-question').value!==$('question').value)$('pip-question').value=$('question').value;});
 $('pip-question').addEventListener('input',()=>{$('question').value=$('pip-question').value;memory.set('draft',$('question').value);});
 $('pip-question').addEventListener('paste',e=>{const item=[...e.clipboardData.items].find(x=>['image/png','image/jpeg'].includes(x.type));if(item){e.preventDefault();loadImage(item.getAsFile()).catch(()=>toast('截图读取失败'));}});
-$('pip-question').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing&&!e.shiftKey&&!e.ctrlKey&&!e.altKey&&!e.metaKey){e.preventDefault();if(!busy)$('question-form').requestSubmit();}});
-$('pip-analyze').addEventListener('click',()=>$('question-form').requestSubmit());$('pip-remove-image').addEventListener('click',()=>$('remove-image').click());
+$('pip-question').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing&&!e.shiftKey&&!e.ctrlKey&&!e.altKey&&!e.metaKey){e.preventDefault();if(!busy){$('pip-question').blur();$('question-form').requestSubmit();}}});
+$('pip-analyze').addEventListener('click',()=>{$('pip-question').blur();$('question-form').requestSubmit();});$('pip-remove-image').addEventListener('click',()=>$('remove-image').click());
 const pipCapture=$('pip-question').parentElement;
 pipCapture.addEventListener('dragover',e=>{if([...(e.dataTransfer?.types||[])].includes('Files')){e.preventDefault();e.dataTransfer.dropEffect=busy?'none':'copy';pipCapture.classList.toggle('dragging',!busy);}});
 pipCapture.addEventListener('dragleave',()=>pipCapture.classList.remove('dragging'));
