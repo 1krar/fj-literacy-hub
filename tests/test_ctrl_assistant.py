@@ -96,6 +96,65 @@ class CtrlTests(unittest.TestCase):
         jobs.pool.shutdown(wait=True)
         self.assertEqual(jobs.get(answer['id'])['results']['gemini']['answer'][:6], 'gemini')
 
+    def test_retry_recovers_existing_reply_without_resending(self):
+        provider = FakeProvider('deepseek')
+        jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': provider})
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        started = ctrl.start({'text': '国家标准在哪里查？', 'models': ['deepseek']})
+        jobs.pool.shutdown(wait=True)
+        original_calls = len(provider.calls)
+        jobs.items[started['id']]['results']['deepseek']['state'] = 'failed'
+        jobs.items[started['id']]['state'] = 'failed'
+        ctrl.sessions[started['session']]['models']['deepseek']['route'] = None
+        ctrl._read_saved_reply = lambda name, model: json.dumps({'keywords': ['国家标准'],
+            'sites': [{'name': '国家标准全文公开系统', 'url': 'https://openstd.samr.gov.cn/bzgk/std/'}]}, ensure_ascii=False)
+        jobs.pool = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=1)
+        retried = ctrl.retry({'job': started['id']})
+        jobs.pool.shutdown(wait=True)
+        self.assertEqual(jobs.get(retried['id'])['state'], 'completed')
+        self.assertEqual(len(provider.calls), original_calls)
+
+    def test_retry_missing_conversation_resends_only_failed_model(self):
+        providers = {name: FakeProvider(name) for name in ('gemini', 'deepseek')}
+        jobs = server.Jobs(providers)
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        started = ctrl.start({'text': '国家标准在哪里查？', 'models': ['deepseek', 'gemini']})
+        jobs.pool.shutdown(wait=True)
+        jobs.items[started['id']]['results']['deepseek']['state'] = 'failed'
+        ctrl._read_saved_reply = lambda name, model: None
+        jobs.pool = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=1)
+        retried = ctrl.retry({'job': started['id']})
+        jobs.pool.shutdown(wait=True)
+        self.assertEqual(retried['retried'], ['deepseek'])
+        self.assertEqual(jobs.get(retried['id'])['state'], 'completed')
+        self.assertEqual(len(providers['deepseek'].calls), 2)
+        self.assertEqual(len(providers['gemini'].calls), 1)
+
+    def test_retry_running_job_reattaches_without_second_submission(self):
+        jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': FakeProvider('deepseek')})
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        ctrl.sessions['s'] = {'models': {}, 'original': '题目'}
+        jobs.items['j'] = {'id': 'j', 'kind': 'ctrl-start', 'session': 's', 'state': 'running',
+                           'results': {'deepseek': {'state': 'running'}}}
+        self.assertEqual(ctrl.retry({'job': 'j'}), {'id': 'j', 'session': 's', 'resumed': True})
+        jobs.pool.shutdown(wait=True)
+
+    def test_retry_recovers_ocr_from_original_tab_without_image_reattachment(self):
+        provider = FakeProvider('deepseek')
+        jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': provider})
+        ctrl = MultiCtrlJobs(jobs, server.read_input)
+        ctrl.sessions['s'] = {'models': {'deepseek': {'original': '', 'route': None, 'answer': '',
+            'receipt': 'receipt', 'phase': 'ocr'}}, 'original': '', 'input_text': '', 'had_image': True}
+        jobs.items['j'] = {'id': 'j', 'kind': 'ctrl-start', 'session': 's', 'state': 'failed',
+                           'results': {'deepseek': {'state': 'failed'}}}
+        ctrl._read_saved_reply = lambda name, model: 'OCR 原题：国家标准在哪里查？'
+        ctrl._continue = lambda name, model, prompt, job: {'status': 'completed', 'text': json.dumps(
+            {'keywords': ['国家标准'], 'sites': []}, ensure_ascii=False)}
+        retried = ctrl.retry({'job': 'j'})
+        jobs.pool.shutdown(wait=True)
+        self.assertEqual(jobs.get(retried['id'])['state'], 'completed')
+        self.assertEqual(len(provider.calls), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

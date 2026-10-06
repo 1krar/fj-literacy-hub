@@ -278,6 +278,8 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(202, ctrl_jobs.start(data))
                 elif self.path == '/api/ctrl/answer' and ctrl_jobs:
                     self.reply(202, ctrl_jobs.answer(data))
+                elif self.path == '/api/ctrl/retry' and ctrl_jobs:
+                    self.reply(202, ctrl_jobs.retry(data))
                 elif self.path == '/api/browser/open':
                     name = data.get('model', 'gemini')
                     if name not in jobs.providers:

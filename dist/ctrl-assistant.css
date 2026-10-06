@@ -11,3 +11,5 @@
 .pip-capture-actions #pip-start,.pip-capture-actions #pip-analyze,.pip-capture-actions #pip-remove-image{font-size:0;white-space:nowrap;overflow:hidden}
 .pip-capture-actions #pip-start::after,.pip-capture-actions #pip-analyze::after{content:"↵";font-size:20px;line-height:1}
 .pip-capture-actions #pip-remove-image::after{content:"×";font-size:17px;line-height:1}
+
+.board-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap;justify-content:flex-end}.board-actions button{font-size:11px;padding:6px 8px;white-space:nowrap}.pip-body .board-head{align-items:flex-start}.pip-body .board-actions{max-width:230px}.pip-body .board-actions button{padding:5px 7px}.pip-body #float{font-size:11px}@media(max-width:380px){.pip-body .board-actions{max-width:164px}.pip-body .board-actions button{font-size:10px;padding:5px}}
