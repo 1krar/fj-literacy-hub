@@ -254,6 +254,17 @@ def handler_for(jobs, session, ctrl_jobs=None):
                         self.reply(200, ctrl_jobs.get_session(session_id))
                     except KeyError:
                         self.reply(404, {'error': 'CTRL 会话已过期，请重新提交题目'})
+                elif path == '/api/ctrl/tasks' and ctrl_jobs:
+                    self.reply(200, {'tasks': ctrl_jobs.list_tasks()})
+                elif path == '/api/ctrl/image' and ctrl_jobs:
+                    try:
+                        session_id = urlsplit(self.path).query.removeprefix('id=')
+                        image, suffix = ctrl_jobs.get_image(session_id)
+                        if not image:
+                            raise KeyError(session_id)
+                        self.reply(200, image, 'image/png' if suffix == '.png' else 'image/jpeg')
+                    except KeyError:
+                        self.reply(404, {'error': '原截图已过期'})
                 elif path.startswith('/api/jobs/'):
                     try:
                         self.reply(200, jobs.get(path.rsplit('/', 1)[-1]))
@@ -288,6 +299,8 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(202, ctrl_jobs.answer(data))
                 elif self.path == '/api/ctrl/retry' and ctrl_jobs:
                     self.reply(202, ctrl_jobs.retry(data))
+                elif self.path == '/api/ctrl/archive' and ctrl_jobs:
+                    self.reply(200, ctrl_jobs.archive(data))
                 elif self.path == '/api/browser/open':
                     name = data.get('model', 'gemini')
                     if name not in jobs.providers:

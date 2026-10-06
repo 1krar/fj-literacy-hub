@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 import re
 import secrets
 import tempfile
+import threading
 import time
 import uuid
 
@@ -97,18 +98,29 @@ class MultiCtrlJobs:
         self.read_input = read_input
         self.providers = jobs.providers
         self.sessions = {}
+        self.model_pools = {name: ThreadPoolExecutor(max_workers=1) for name in MODELS}
+        self.intake_lock = threading.RLock()
+        self.client_requests = {}
+
+    def shutdown(self, wait=True):
+        for pool in self.model_pools.values():
+            pool.shutdown(wait=wait)
+
+    def wait_idle(self):
+        for pool in self.model_pools.values():
+            pool.submit(lambda: None).result()
 
     def _reserve(self, kind, session_id, models):
         with self.jobs.lock:
-            if self.jobs.active:
-                raise RuntimeError('已有模型任务正在运行，请等待完成')
-            if len(self.jobs.items) >= 20:
-                del self.jobs.items[next(iter(self.jobs.items))]
+            if len(self.jobs.items) >= 100:
+                removable = next((key for key, item in self.jobs.items.items()
+                                  if item['state'] != 'running'), None)
+                if removable:
+                    del self.jobs.items[removable]
             job_id = uuid.uuid4().hex
-            self.jobs.active = job_id
             self.jobs.items[job_id] = {'id': job_id, 'kind': kind, 'session': session_id,
                                        'state': 'running', 'models': models,
-                                       'results': {name: {'state': 'running', 'stage': '准备连接'} for name in models},
+                                     'results': {name: {'state': 'queued', 'stage': '排队等待模型'} for name in models},
                                        'started_at': time.time()}
         return job_id
 
@@ -119,24 +131,61 @@ class MultiCtrlJobs:
     def _finish(self, job_id):
         with self.jobs.lock:
             results = self.jobs.items[job_id]['results']
+            if any(item['state'] in ('queued', 'running') for item in results.values()):
+                return
             success = any(item['state'] == 'completed' for item in results.values())
             self.jobs.items[job_id]['state'] = 'completed' if success else 'failed'
             self.jobs.items[job_id]['stage'] = '所选模型已处理完毕'
-            self.jobs.active = None
+
+    def _submit_model(self, job_id, name, work, *args):
+        def run():
+            self._mark(job_id, name, state='running')
+            try:
+                work(job_id, *args, name)
+            except Exception as exc:
+                self._mark(job_id, name, state='failed', error=str(exc)[:400],
+                           completed_at=time.time())
+            finally:
+                self._finish(job_id)
+        self.model_pools[name].submit(run)
 
     def _clean_old(self):
-        # Keep the new conversation; close only tabs created by older CTRL runs.
-        for session_id, session in list(self.sessions.items()):
+        # Keep recent task conversations for switching and follow-up answers.
+        while len(self.sessions) > 20:
+            with self.jobs.lock:
+                running = {item['session'] for item in self.jobs.items.values()
+                           if item['state'] == 'running' and 'session' in item}
+            session_id = next((key for key in self.sessions if key not in running), None)
+            if not session_id:
+                return
+            session = self.sessions[session_id]
             for name, model in session['models'].items():
                 if model.get('receipt'):
-                    try:
-                        self.providers[name].close_saved_response(model['receipt'])
-                    except Exception:
-                        pass
+                    self.model_pools[name].submit(self.providers[name].close_saved_response, model['receipt'])
             del self.sessions[session_id]
+            if session.get('client_id'):
+                self.client_requests.pop(session['client_id'], None)
 
     def start(self, data):
+        with self.intake_lock:
+            return self._start(data)
+
+    def _start(self, data):
+        client_id = data.get('client_id')
+        if client_id is not None and (not isinstance(client_id, str) or
+                                      not re.fullmatch(r'[\w-]{1,100}', client_id)):
+            raise ValueError('提交编号无效')
+        if client_id and client_id in self.client_requests:
+            return dict(self.client_requests[client_id])
+        with self.jobs.lock:
+            running = {item.get('session') for item in self.jobs.items.values()
+                       if item.get('kind', '').startswith('ctrl-') and item['state'] == 'running'}
+        if len(running) >= 20:
+            raise ValueError('队列已有20道正在处理的题目；请等部分完成后再提交，当前截图仍可重试')
         models = selected_models(data)
+        fast_answer = data.get('fast_answer', False)
+        if not isinstance(fast_answer, bool):
+            raise ValueError('快答选项无效')
         text = data.get('text', '')
         image = data.get('image')
         if not isinstance(text, str) or len(text) > 10000:
@@ -149,15 +198,20 @@ class MultiCtrlJobs:
             _, raw, suffix = self.read_input({'question': text or '截图', 'prompt': OCR_PROMPT, 'image': image})
         session_id = uuid.uuid4().hex
         job_id = self._reserve('ctrl-start', session_id, models)
-        self._clean_old()
         self.sessions[session_id] = {'models': {name: {'original': '', 'route': None, 'answer': '', 'receipt': None,
                                                      'phase': 'preparing'} for name in MODELS},
                                      'original': text if not raw else '', 'input_text': text,
-                                     'had_image': bool(raw)}
-        self.jobs.pool.submit(self._run_start, job_id, session_id, models, text, raw, suffix)
+                                     'had_image': bool(raw), 'image': raw, 'image_suffix': suffix,
+                                     'created_at': time.time(), 'fast_answer': fast_answer,
+                                     'client_id': client_id}
+        if client_id:
+            self.client_requests[client_id] = {'id': job_id, 'session': session_id}
+        for name in models:
+            self._submit_model(job_id, name, self._start_queued, session_id, text, raw, suffix)
+        self._clean_old()
         return {'id': job_id, 'session': session_id}
 
-    def _run_start(self, job_id, session_id, models, text, raw, suffix):
+    def _start_queued(self, job_id, session_id, text, raw, suffix, name):
         path = None
         try:
             if raw:
@@ -166,12 +220,10 @@ class MultiCtrlJobs:
                 with tempfile.NamedTemporaryFile(dir=folder, suffix=suffix, delete=False) as file:
                     file.write(raw)
                     path = Path(file.name)
-            with ThreadPoolExecutor(max_workers=len(models)) as pool:
-                list(pool.map(lambda name: self._start_model(job_id, session_id, name, text, path), models))
+            self._start_model(job_id, session_id, name, text, path)
         finally:
             if path:
                 path.unlink(missing_ok=True)
-            self._finish(job_id)
 
     def _start_model(self, job_id, session_id, name, text, path):
         model = self.sessions[session_id]['models'][name]
@@ -197,12 +249,14 @@ class MultiCtrlJobs:
                     if not self.sessions[session_id]['original']:
                         self.sessions[session_id]['original'] = model['original']
                 self._mark(job_id, name, original=model['original'], stage='原题已识别，正在提取关键词和网站')
-                result = self._continue(name, model, route_prompt(model['original']), job_id)
+                result = self._continue(name, model, route_prompt(model['original'],
+                    self.sessions[session_id].get('fast_answer', False)), job_id)
             else:
                 model['original'] = text
                 model['phase'] = 'route'
                 self._mark(job_id, name, original=text, stage='正在提取关键词和网站')
-                result = provider.generate_with_progress(progress.prompt('原题：\n'+text+'\n\n'+route_prompt(text)),
+                result = provider.generate_with_progress(progress.prompt('原题：\n'+text+'\n\n'+route_prompt(text,
+                    self.sessions[session_id].get('fast_answer', False))),
                     None, progress)
                 model['receipt'] = result.get('cleanup_receipt')
                 if model['guarded'] and not progress.key:
@@ -212,9 +266,12 @@ class MultiCtrlJobs:
             if result.get('status') != 'completed':
                 raise RuntimeError(result.get('detail') or '关键词和网站未完成')
             model['route'] = parse_route(result.get('text', ''), model['original'])
+            if self.sessions[session_id].get('fast_answer'):
+                model['answer'] = model['route'].pop('answer', '')
             model['phase'] = 'route_done'
             self._mark(job_id, name, state='completed', stage='关键词和网站已返回',
-                       original=model['original'], route=model['route'], completed_at=time.time())
+                       original=model['original'], route=model['route'], answer=model['answer'],
+                       completed_at=time.time())
         except Exception as exc:
             transport = getattr(provider, '_transport', None)
             receipt = getattr(transport, '_last_request_receipt', None)
@@ -368,13 +425,12 @@ class MultiCtrlJobs:
             raise ValueError('原题会话已过期，请重新提交题目')
         models = selected_models(data)
         job_id = self._reserve('ctrl-answer', session_id, models)
-        self.jobs.pool.submit(self._run_answer, job_id, session_id, models)
+        for name in models:
+            self._submit_model(job_id, name, self._answer_queued, session_id)
         return {'id': job_id, 'session': session_id}
 
-    def _run_answer(self, job_id, session_id, models):
-        with ThreadPoolExecutor(max_workers=len(models)) as pool:
-            list(pool.map(lambda name: self._answer_model(job_id, session_id, name), models))
-        self._finish(job_id)
+    def _answer_queued(self, job_id, session_id, name):
+        self._answer_model(job_id, session_id, name)
 
     def _answer_model(self, job_id, session_id, name):
         session = self.sessions[session_id]
@@ -433,12 +489,28 @@ class MultiCtrlJobs:
         image = data.get('image')
         raw, suffix = None, None
         if kind == 'start' and current['had_image'] and any(not current['models'][name]['original'] for name in failed):
-            if image:
+            raw, suffix = current.get('image'), current.get('image_suffix')
+            if not raw and image:
                 _, raw, suffix = self.read_input({'question': current['input_text'] or '截图',
                                                    'prompt': OCR_PROMPT, 'image': image})
         job_id = self._reserve('ctrl-retry-'+kind, session_id, failed)
-        self.jobs.pool.submit(self._run_retry, job_id, session_id, kind, failed, raw, suffix)
+        for name in failed:
+            self._submit_model(job_id, name, self._retry_queued, session_id, kind, raw, suffix)
         return {'id': job_id, 'session': session_id, 'retried': failed}
+
+    def _retry_queued(self, job_id, session_id, kind, raw, suffix, name):
+        path = None
+        try:
+            if raw:
+                folder = ROOT / '.runtime/uploads'
+                folder.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=folder, suffix=suffix, delete=False) as file:
+                    file.write(raw)
+                    path = Path(file.name)
+            self._retry_model(job_id, session_id, kind, name, path)
+        finally:
+            if path:
+                path.unlink(missing_ok=True)
 
     def _read_saved_reply(self, name, model):
         """Read a confirmed final reply from the owned tab; never submit here."""
@@ -490,22 +562,6 @@ class MultiCtrlJobs:
             finally:
                 connection.__exit__(None, None, None)
 
-    def _run_retry(self, job_id, session_id, kind, models, raw, suffix):
-        path = None
-        try:
-            if raw:
-                folder = ROOT / '.runtime/uploads'
-                folder.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile(dir=folder, suffix=suffix, delete=False) as file:
-                    file.write(raw)
-                    path = Path(file.name)
-            with ThreadPoolExecutor(max_workers=len(models)) as pool:
-                list(pool.map(lambda name: self._retry_model(job_id, session_id, kind, name, path), models))
-        finally:
-            if path:
-                path.unlink(missing_ok=True)
-            self._finish(job_id)
-
     def _retry_model(self, job_id, session_id, kind, name, path):
         session = self.sessions[session_id]
         model = session['models'][name]
@@ -530,17 +586,21 @@ class MultiCtrlJobs:
                     if not session['original']:
                         session['original'] = model['original']
                     self._mark(job_id, name, original=model['original'], stage='已取回原题，继续检索建议')
-                    result = self._continue(name, model, route_prompt(model['original']), job_id)
+                    result = self._continue(name, model, route_prompt(model['original'],
+                        session.get('fast_answer', False)), job_id)
                     if result.get('status') != 'completed':
                         raise RuntimeError(result.get('detail') or '检索建议未完成')
                     reply = result.get('text', '')
                 elif model['phase'] == 'ocr_done':
                     self._mark(job_id, name, original=model['original'], stage='继续生成检索建议')
-                    result = self._continue(name, model, route_prompt(model['original']), job_id)
+                    result = self._continue(name, model, route_prompt(model['original'],
+                        session.get('fast_answer', False)), job_id)
                     if result.get('status') != 'completed':
                         raise RuntimeError(result.get('detail') or '检索建议未完成')
                     reply = result.get('text', '')
                 model['route'] = parse_route(reply, model['original'])
+                if session.get('fast_answer'):
+                    model['answer'] = model['route'].pop('answer', '')
             else:
                 self._mark(job_id, name, stage='原对话已消失，正在新会话重新识题')
                 if session['had_image'] and not model['original'] and not path:
@@ -550,7 +610,8 @@ class MultiCtrlJobs:
                 return
             model['phase'] = 'route_done'
             self._mark(job_id, name, state='completed', stage='已从原对话取回检索建议',
-                       original=model['original'], route=model['route'], completed_at=time.time())
+                       original=model['original'], route=model['route'], answer=model['answer'],
+                       completed_at=time.time())
         except Exception as exc:
             self._mark(job_id, name, state='failed', stage='重试未完成',
                        original=model['original'], error=str(exc)[:400], completed_at=time.time())
@@ -559,7 +620,65 @@ class MultiCtrlJobs:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
-        return {'original': session['original'],
+        with self.jobs.lock:
+            jobs = [item for item in self.jobs.items.values() if item.get('session') == session_id]
+            activity = {}
+            for item in jobs:
+                activity.update({name: dict(value) for name, value in item['results'].items()})
+            state = 'running' if any(item['state'] == 'running' for item in jobs) else (
+                jobs[-1]['state'] if jobs else 'completed')
+        return {'original': session['original'], 'state': state, 'activity': activity,
+                'job': jobs[-1]['id'] if jobs else None,
+                'started_at': session.get('created_at') or (jobs[-1].get('started_at') if jobs else None),
+                'created_at': session.get('created_at'),
                 'models': {name: {key: model[key] for key in ('original', 'route', 'answer')}
                            for name, model in session['models'].items()}}
+
+    def list_tasks(self):
+        tasks = []
+        with self.jobs.lock:
+            items = list(self.jobs.items.values())
+        for session_id, session in list(self.sessions.items()):
+            jobs = [item for item in items if item.get('session') == session_id]
+            current = jobs[-1] if jobs else None
+            activity = {}
+            for item in jobs:
+                activity.update(item['results'])
+            title = (session['original'] or session['input_text'] or '截图识别中').replace('\n', ' ').strip()
+            tasks.append({'session': session_id, 'title': title[:45],
+                          'client_id': session.get('client_id'),
+                          'created_at': session.get('created_at'),
+                          'job': current['id'] if current else None,
+                          'state': 'running' if any(item['state'] == 'running' for item in jobs)
+                                   else current['state'] if current else 'completed',
+                          'ready': any(model.get('route') for model in session['models'].values()),
+                          'has_original': bool(session['original']),
+                          'has_failure': any(value['state'] == 'failed' for value in activity.values()),
+                          'had_image': session['had_image']})
+        return tasks
+
+    def archive(self, data):
+        session_id = data.get('session')
+        with self.intake_lock:
+            session = self.sessions.get(session_id)
+            if not session:
+                raise ValueError('题目已过期')
+            with self.jobs.lock:
+                if any(item.get('session') == session_id and item['state'] == 'running'
+                       for item in self.jobs.items.values()):
+                    raise ValueError('当前题仍在处理，请完成后归档')
+            for name, model in session['models'].items():
+                receipt = model.get('receipt')
+                if receipt:
+                    self.model_pools[name].submit(self.providers[name].close_saved_response, receipt)
+            del self.sessions[session_id]
+            if session.get('client_id'):
+                self.client_requests.pop(session['client_id'], None)
+        return {'archived': True}
+
+    def get_image(self, session_id):
+        session = self.sessions.get(session_id)
+        if not session:
+            raise KeyError(session_id)
+        return session.get('image'), session.get('image_suffix')
 
