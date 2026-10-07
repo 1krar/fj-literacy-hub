@@ -10,7 +10,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from qwen_api import QwenProvider, validate_base
+from qwen_api import DEFAULT_BASE, QwenProvider, validate_base
 
 
 class ApiTests(unittest.TestCase):
@@ -69,10 +69,28 @@ class ApiTests(unittest.TestCase):
         for value in ['http://dashscope.aliyuncs.com/compatible-mode/v1',
                       'https://evil.example/compatible-mode/v1',
                       'https://dashscope.aliyuncs.com.evil.example/compatible-mode/v1',
+                      'https://maas.qianwenaiapi.com.evil.example/compatible-mode/v1',
+                      'https://evil.qianwenaiapi.com/compatible-mode/v1',
                       'https://key@dashscope.aliyuncs.com/compatible-mode/v1',
                       'https://dashscope.aliyuncs.com/compatible-mode/v1?key=secret']:
             with self.assertRaises(ValueError):
                 validate_base(value)
+
+    def test_qwen_official_preset_and_full_request_url_normalize_to_base(self):
+        for value in ('', '  ', DEFAULT_BASE, DEFAULT_BASE+'/', DEFAULT_BASE+'/chat/completions',
+                      ' '+DEFAULT_BASE+'/chat/completions/ '):
+            self.assertEqual(validate_base(value), DEFAULT_BASE)
+        self.provider.configure({**self.config, 'base_url':DEFAULT_BASE+'/chat/completions'})
+        self.assertEqual(self.provider.public_config()['base_url'], DEFAULT_BASE)
+        with patch('qwen_api.build_opener') as opener:
+            opener.return_value.open.return_value = self.stream('结果')
+            result = self.provider.generate_with_progress('题目', None, lambda stage: None)
+            self.assertEqual(result['status'], 'completed')
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, DEFAULT_BASE+'/chat/completions')
+        fresh = QwenProvider(Path(self.temp.name)/'new.dpapi')
+        self.assertEqual(fresh.public_config()['base_url'], DEFAULT_BASE)
+        self.assertFalse(fresh.public_config()['configured'])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
     def test_remembered_config_is_encrypted_and_can_be_reloaded_then_removed(self):

@@ -11,6 +11,7 @@ const ids = ['connection','connection-detail','open-deepseek','open-gemini','rou
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
 const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash'};
+const defaultQwenBase = 'https://maas.qianwenaiapi.com/compatible-mode/v1';
 const boardHome = ui['ctrl-board'].parentElement;
 let csrf = '', pip = null, draftImage = null, selectedId = '', tasks = [], nextNumber = 1;
 let connectionState = {}, watchRunning = false;
@@ -365,7 +366,7 @@ function drawDispatch(snapshot) {
     (snapshot.waiting ? ` · 等待 ${snapshot.waiting} 项` : '');
 }
 function setQwenConfig(config) {
-  ui['qwen-base'].value = config.base_url || '';
+  ui['qwen-base'].value = config.base_url || defaultQwenBase;
   ui['qwen-remember'].checked = !!config.remembered;
   ui['route-qwen'].disabled = !config.configured;
   if (!config.configured) ui['route-qwen'].checked = false;
@@ -379,7 +380,8 @@ async function loadQwenConfig() {
 ui['qwen-save'].addEventListener('click', async () => {
   ui['qwen-save'].dataset.saving = 'true'; ui['qwen-save'].disabled = true;
   try {
-    const config = await api('ctrl/qwen-config', {model:'qwen3.8-flash', base_url:ui['qwen-base'].value.trim(),
+    const base = (ui['qwen-base'].value.trim() || defaultQwenBase).replace(/\/chat\/completions\/?$/, '');
+    const config = await api('ctrl/qwen-config', {model:'qwen3.8-flash', base_url:base,
       api_key:ui['qwen-key'].value.trim(), remember:ui['qwen-remember'].checked});
     ui['qwen-key'].value = ''; setQwenConfig(config); ui['route-qwen'].checked = true;
     await refreshConnections();

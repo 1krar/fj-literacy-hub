@@ -48,7 +48,7 @@ CTRL 助手采用公共待处理队列：每题只分给一个空闲模型，默
 
 主页面和置顶小窗的任意内容区域均支持 Ctrl+V 粘贴截图及拖图；连续图片各新增一题，不覆盖当前题，也不自动切换正在查看的卡片。重试优先读取原对话；读取失败时，可在重试旁的“⋯”选择重新执行失败步骤。
 
-在本机 CTRL 助手展开“千问 API 设置”，填写百炼控制台的 Base URL 和 API Key，保存后可将 `qwen3.8-flash` 加入派单。Key 不回传到前端；可选择用 Windows DPAPI 在 `.runtime/qwen-config.dpapi` 加密记住。不记住则仅当前服务进程保留。也支持 `LITERACY_QWEN_API_KEY`、`LITERACY_QWEN_BASE_URL` 环境变量。API 请求使用流式回复，默认关闭思考模式；中断或截断不会当作完整结果，也不会自动重发。
+在本机 CTRL 助手展开“千问 API 设置”，地址已预设为 `https://maas.qianwenaiapi.com/compatible-mode/v1`；填写 API Key 即可保存，并将 `qwen3.8-flash` 加入派单。使用百炼业务空间或其他地域的 Key 时，可将地址改为控制台提供的地址；完整的 `/chat/completions` 接口地址会自动转换为 Base URL。Key 不回传到前端；可选择用 Windows DPAPI 在 `.runtime/qwen-config.dpapi` 加密记住。不记住则仅当前服务进程保留。也支持 `LITERACY_QWEN_API_KEY`、`LITERACY_QWEN_BASE_URL` 环境变量。API 请求使用流式回复，默认关闭思考模式；中断或截断不会当作完整结果，也不会自动重发。
 
 目前 API 功能仍由本机服务调用。静态页面不能保存或使用凭证，手机云端自动调用将在后续加入独立的后台服务。
 

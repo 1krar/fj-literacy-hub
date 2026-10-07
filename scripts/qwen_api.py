@@ -13,20 +13,22 @@ from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler
 import uuid
 
 DEFAULT_MODEL = 'qwen3.8-flash'
+DEFAULT_BASE = 'https://maas.qianwenaiapi.com/compatible-mode/v1'
 
 
 def validate_base(value):
     if not isinstance(value, str) or len(value) > 300:
         raise ValueError('请填写阿里云百炼的 HTTPS Base URL')
+    value = value.strip() or DEFAULT_BASE
     parsed = urlsplit(value)
     hostname = parsed.hostname or ''
     official = hostname in ('dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com',
-                             'dashscope-us.aliyuncs.com') or hostname.endswith('.maas.aliyuncs.com')
+                             'dashscope-us.aliyuncs.com', 'maas.qianwenaiapi.com') or hostname.endswith('.maas.aliyuncs.com')
     if (not official or parsed.scheme != 'https' or parsed.username or parsed.password or
             parsed.port not in (None, 443) or parsed.query or parsed.fragment or
-            parsed.path.rstrip('/') != '/compatible-mode/v1'):
+            parsed.path.rstrip('/') not in ('/compatible-mode/v1', '/compatible-mode/v1/chat/completions')):
         raise ValueError('请使用百炼控制台提供的 HTTPS Base URL，路径为 /compatible-mode/v1')
-    return value.rstrip('/')
+    return 'https://' + hostname + '/compatible-mode/v1'
 
 
 def dpapi(raw, decrypt=False):
@@ -62,15 +64,14 @@ class QwenProvider:
     def __init__(self, config_path):
         self.path = Path(config_path)
         self.lock = threading.RLock()
-        self.config = {'base_url': '', 'model': DEFAULT_MODEL, 'api_key': ''}
+        self.config = {'base_url': DEFAULT_BASE, 'model': DEFAULT_MODEL, 'api_key': ''}
         self.chats = {}
         self.remembered = False
         self.load_error = ''
         if self.path.is_file():
             try:
                 saved = json.loads(dpapi(self.path.read_bytes(), decrypt=True))
-                self._validated(saved)
-                self.config = saved
+                self.config = self._validated(saved)
                 self.remembered = True
             except Exception:
                 self.load_error = '加密配置无法读取，请重新填写 API 配置'
