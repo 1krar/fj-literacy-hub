@@ -1,5 +1,5 @@
 """Parallel CTRL workflows, preserving one browser conversation per model."""
-from concurrent.futures import ThreadPoolExecutor
+from ctrl_dispatch import Dispatcher
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -12,7 +12,7 @@ import uuid
 
 from ctrl_assistant import OCR_PROMPT, ANSWER_PROMPT, ROOT, parse_route, route_prompt
 
-MODELS = ('deepseek', 'gemini')
+MODELS = ('deepseek', 'gemini', 'qwen')
 
 
 class ConversationChanged(RuntimeError):
@@ -86,9 +86,9 @@ class CtrlProgress:
 
 def selected_models(data):
     models = data.get('models', ['deepseek'])
-    if (not isinstance(models, list) or not models or len(models) > 2 or len(set(models)) != len(models)
+    if (not isinstance(models, list) or not models or len(models) > len(MODELS) or len(set(models)) != len(models)
             or any(name not in MODELS for name in models)):
-        raise ValueError('请选择 DeepSeek、Gemini 或两者')
+        raise ValueError('请选择参与自动派单的模型')
     return models
 
 
@@ -98,17 +98,16 @@ class MultiCtrlJobs:
         self.read_input = read_input
         self.providers = jobs.providers
         self.sessions = {}
-        self.model_pools = {name: ThreadPoolExecutor(max_workers=1) for name in MODELS}
+        self.dispatcher = Dispatcher([name for name in MODELS if name in self.providers])
+        self.model_pools = self.dispatcher.pools
         self.intake_lock = threading.RLock()
         self.client_requests = {}
 
     def shutdown(self, wait=True):
-        for pool in self.model_pools.values():
-            pool.shutdown(wait=wait)
+        self.dispatcher.shutdown(wait=wait)
 
     def wait_idle(self):
-        for pool in self.model_pools.values():
-            pool.submit(lambda: None).result()
+        self.dispatcher.wait_idle()
 
     def _reserve(self, kind, session_id, models):
         with self.jobs.lock:
@@ -120,7 +119,8 @@ class MultiCtrlJobs:
             job_id = uuid.uuid4().hex
             self.jobs.items[job_id] = {'id': job_id, 'kind': kind, 'session': session_id,
                                        'state': 'running', 'models': models,
-                                     'results': {name: {'state': 'queued', 'stage': '排队等待模型'} for name in models},
+                                     'results': {name: {'state': 'queued', 'stage': '排队等待模型'} for name in models} if models else
+                                                {'waiting': {'state': 'queued', 'stage': '等待空闲模型自动领题'}},
                                        'started_at': time.time()}
         return job_id
 
@@ -135,10 +135,10 @@ class MultiCtrlJobs:
                 return
             success = any(item['state'] == 'completed' for item in results.values())
             self.jobs.items[job_id]['state'] = 'completed' if success else 'failed'
-            self.jobs.items[job_id]['stage'] = '所选模型已处理完毕'
+            self.jobs.items[job_id]['stage'] = '本题处理完毕'
 
-    def _submit_model(self, job_id, name, work, *args):
-        def run():
+    def _submit_model(self, job_id, name, work, *args, priority=10):
+        def run(assigned):
             self._mark(job_id, name, state='running')
             try:
                 work(job_id, *args, name)
@@ -147,7 +147,23 @@ class MultiCtrlJobs:
                            completed_at=time.time())
             finally:
                 self._finish(job_id)
-        self.model_pools[name].submit(run)
+        self.dispatcher.enqueue([name], lambda assigned: None, run, priority)
+
+    def _assign_start(self, job_id, session_id, candidates, text, raw, suffix):
+        def assign(name):
+            self.sessions[session_id]['assigned'] = name
+            with self.jobs.lock:
+                self.jobs.items[job_id]['models'] = [name]
+                self.jobs.items[job_id]['results'] = {name: {'state': 'queued', 'stage': '已领题，准备处理'}}
+        def run(name):
+            self._mark(job_id, name, state='running')
+            try:
+                self._start_queued(job_id, session_id, text, raw, suffix, name)
+            except Exception as exc:
+                self._mark(job_id, name, state='failed', error=str(exc)[:400], completed_at=time.time())
+            finally:
+                self._finish(job_id)
+        self.dispatcher.enqueue(candidates, assign, run)
 
     def _clean_old(self):
         # Keep recent task conversations for switching and follow-up answers.
@@ -183,6 +199,9 @@ class MultiCtrlJobs:
         if len(running) >= 20:
             raise ValueError('队列已有20道正在处理的题目；请等部分完成后再提交，当前截图仍可重试')
         models = selected_models(data)
+        if any(name not in self.providers for name in models):
+            raise ValueError('当前服务未配置所选模型')
+        candidates = [name for name in MODELS if name in models]
         fast_answer = data.get('fast_answer', False)
         if not isinstance(fast_answer, bool):
             raise ValueError('快答选项无效')
@@ -197,17 +216,16 @@ class MultiCtrlJobs:
         if image:
             _, raw, suffix = self.read_input({'question': text or '截图', 'prompt': OCR_PROMPT, 'image': image})
         session_id = uuid.uuid4().hex
-        job_id = self._reserve('ctrl-start', session_id, models)
+        job_id = self._reserve('ctrl-start', session_id, [])
         self.sessions[session_id] = {'models': {name: {'original': '', 'route': None, 'answer': '', 'receipt': None,
-                                                     'phase': 'preparing'} for name in MODELS},
+                                                     'phase': 'preparing'} for name in self.model_pools},
                                      'original': text if not raw else '', 'input_text': text,
                                      'had_image': bool(raw), 'image': raw, 'image_suffix': suffix,
                                      'created_at': time.time(), 'fast_answer': fast_answer,
-                                     'client_id': client_id}
+                                     'client_id': client_id, 'assigned': None, 'candidates': candidates}
         if client_id:
             self.client_requests[client_id] = {'id': job_id, 'session': session_id}
-        for name in models:
-            self._submit_model(job_id, name, self._start_queued, session_id, text, raw, suffix)
+        self._assign_start(job_id, session_id, candidates, text, raw, suffix)
         self._clean_old()
         return {'id': job_id, 'session': session_id}
 
@@ -353,6 +371,12 @@ class MultiCtrlJobs:
             raise ConversationChanged('模型标签已切换到另一段对话；未采纳该页面回复，请点重试返回原对话')
 
     def _continue(self, name, model, prompt, job_id):
+        provider = self.providers[name]
+        if hasattr(provider, 'continue_saved'):
+            model['phase'] = 'answer_sent' if prompt == ANSWER_PROMPT else 'route_sent'
+            self._mark(job_id, name, stage='正在同一题目上下文调用 API')
+            return provider.continue_saved(model.get('receipt'), prompt,
+                                           lambda stage: self._mark(job_id, name, stage=stage))
         from playwright.sync_api import Error, TimeoutError as PlaywrightTimeout
         from evidence_chain.providers.ai.gemini_web import FinalResponseTracker
         provider = self.providers[name]
@@ -419,14 +443,27 @@ class MultiCtrlJobs:
                 raise RuntimeError('模型网页操作失败；请检查原对话，未自动重发') from exc
 
     def answer(self, data):
+        with self.intake_lock:
+            return self._answer(data)
+
+    def _answer(self, data):
         session_id = data.get('session')
         session = self.sessions.get(session_id) if isinstance(session_id, str) else None
         if not session or not session['original']:
             raise ValueError('原题会话已过期，请重新提交题目')
-        models = selected_models(data)
+        assigned = session.get('assigned')
+        if not assigned:
+            raise ValueError('本题尚未分配模型，请等待识题')
+        with self.jobs.lock:
+            active = next((item for item in self.jobs.items.values()
+                           if item.get('session') == session_id and item['state'] == 'running'
+                           and item.get('kind', '').endswith('answer')), None)
+        if active:
+            return {'id': active['id'], 'session': session_id, 'resumed': True}
+        models = [assigned]
         job_id = self._reserve('ctrl-answer', session_id, models)
         for name in models:
-            self._submit_model(job_id, name, self._answer_queued, session_id)
+            self._submit_model(job_id, name, self._answer_queued, session_id, priority=0)
         return {'id': job_id, 'session': session_id}
 
     def _answer_queued(self, job_id, session_id, name):
@@ -467,6 +504,13 @@ class MultiCtrlJobs:
                        error=str(exc)[:400], completed_at=time.time())
 
     def retry(self, data):
+        with self.intake_lock:
+            return self._retry(data)
+
+    def _retry(self, data):
+        mode = data.get('mode', 'read_first')
+        if mode not in ('read_first', 'restart'):
+            raise ValueError('重试方式无效')
         previous_id = data.get('job')
         if not isinstance(previous_id, str):
             raise ValueError('缺少原任务编号，请重新提交题目')
@@ -485,6 +529,11 @@ class MultiCtrlJobs:
         current = self.sessions.get(session_id)
         if not current:
             raise ValueError('本机会话已过期，请重新提交题目')
+        with self.jobs.lock:
+            active = next((item for item in self.jobs.items.values()
+                           if item.get('session') == session_id and item['state'] == 'running'), None)
+        if active:
+            return {'id': active['id'], 'session': session_id, 'resumed': True}
         kind = 'answer' if previous['kind'].endswith('answer') else 'start'
         image = data.get('image')
         raw, suffix = None, None
@@ -495,10 +544,10 @@ class MultiCtrlJobs:
                                                    'prompt': OCR_PROMPT, 'image': image})
         job_id = self._reserve('ctrl-retry-'+kind, session_id, failed)
         for name in failed:
-            self._submit_model(job_id, name, self._retry_queued, session_id, kind, raw, suffix)
+            self._submit_model(job_id, name, self._retry_queued, session_id, kind, raw, suffix, mode, priority=0)
         return {'id': job_id, 'session': session_id, 'retried': failed}
 
-    def _retry_queued(self, job_id, session_id, kind, raw, suffix, name):
+    def _retry_queued(self, job_id, session_id, kind, raw, suffix, mode, name):
         path = None
         try:
             if raw:
@@ -507,13 +556,15 @@ class MultiCtrlJobs:
                 with tempfile.NamedTemporaryFile(dir=folder, suffix=suffix, delete=False) as file:
                     file.write(raw)
                     path = Path(file.name)
-            self._retry_model(job_id, session_id, kind, name, path)
+            self._retry_model(job_id, session_id, kind, name, path, mode)
         finally:
             if path:
                 path.unlink(missing_ok=True)
 
     def _read_saved_reply(self, name, model):
         """Read a confirmed final reply from the owned tab; never submit here."""
+        if hasattr(self.providers[name], 'read_saved_reply'):
+            return self.providers[name].read_saved_reply(model.get('receipt'))
         from evidence_chain.providers.ai.gemini_web import BrowserUnavailable, FinalResponseTracker
         provider = self.providers[name]
         transport = provider._transport
@@ -562,12 +613,15 @@ class MultiCtrlJobs:
             finally:
                 connection.__exit__(None, None, None)
 
-    def _retry_model(self, job_id, session_id, kind, name, path):
+    def _retry_model(self, job_id, session_id, kind, name, path, mode='read_first'):
         session = self.sessions[session_id]
         model = session['models'][name]
         try:
             self._mark(job_id, name, stage='正在读取原模型对话')
-            reply = self._read_saved_reply(name, model) if model.get('receipt') else None
+            reply = self._read_saved_reply(name, model) if model.get('receipt') and mode != 'restart' else None
+            if mode == 'restart' and model.get('receipt'):
+                self.providers[name].close_saved_response(model['receipt'])
+                model['receipt'] = None
             if kind == 'answer':
                 if reply:
                     model['answer'] = reply[:12000]
@@ -628,8 +682,10 @@ class MultiCtrlJobs:
             state = 'running' if any(item['state'] == 'running' for item in jobs) else (
                 jobs[-1]['state'] if jobs else 'completed')
         return {'original': session['original'], 'state': state, 'activity': activity,
+                'assigned': session.get('assigned'),
+                'kind': jobs[-1].get('kind') if jobs else None,
                 'job': jobs[-1]['id'] if jobs else None,
-                'started_at': session.get('created_at') or (jobs[-1].get('started_at') if jobs else None),
+                'started_at': jobs[-1].get('started_at') if jobs else session.get('created_at'),
                 'created_at': session.get('created_at'),
                 'models': {name: {key: model[key] for key in ('original', 'route', 'answer')}
                            for name, model in session['models'].items()}}
@@ -646,6 +702,7 @@ class MultiCtrlJobs:
                 activity.update(item['results'])
             title = (session['original'] or session['input_text'] or '截图识别中').replace('\n', ' ').strip()
             tasks.append({'session': session_id, 'title': title[:45],
+                          'assigned': session.get('assigned'),
                           'client_id': session.get('client_id'),
                           'created_at': session.get('created_at'),
                           'job': current['id'] if current else None,
@@ -681,4 +738,3 @@ class MultiCtrlJobs:
         if not session:
             raise KeyError(session_id)
         return session.get('image'), session.get('image_suffix')
-

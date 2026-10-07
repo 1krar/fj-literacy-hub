@@ -82,10 +82,11 @@ const guideCssHash=createHash("sha256").update(fs.readFileSync(path.join(root,"d
 fs.writeFileSync(guidePath,fs.readFileSync(guidePath,"utf8").replace(/launch-assistant\.css(?:\?v=[a-f0-9]+)?/g,"launch-assistant.css?v="+guideCssHash));
 let ctrlHtml=fs.readFileSync(path.join(root,'dist','ctrl-assistant.html'),'utf8');
 const ctrlModule=path.join(root,'dist','ctrl-assistant-v2.mjs');
+const captureHash=createHash('sha256').update(fs.readFileSync(path.join(root,'dist','capture-input.mjs'))).digest('hex').slice(0,10);
+fs.writeFileSync(ctrlModule,fs.readFileSync(ctrlModule,'utf8').replace(/capture-input\.mjs(?:\?v=[a-f0-9]+)?/g,'capture-input.mjs?v='+captureHash));
 fs.writeFileSync(ctrlModule,fs.readFileSync(ctrlModule,'utf8').replace(/assistant-core\.mjs(?:\?v=[a-f0-9]+)?/g,'assistant-core.mjs?v='+coreHash));
 for(const asset of ['ctrl-assistant.css','ctrl-assistant-v2.mjs']){
   const hash=createHash('sha256').update(fs.readFileSync(path.join(root,'dist',asset))).digest('hex').slice(0,10);
   ctrlHtml=ctrlHtml.replace(new RegExp(asset.replace('.', '\\.')+'(?:\\?v=[a-zA-Z0-9]+)?','g'),asset+'?v='+hash);
 }
 fs.writeFileSync(path.join(root,'dist','ctrl-assistant.html'),ctrlHtml);
-

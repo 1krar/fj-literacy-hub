@@ -61,7 +61,7 @@ class CtrlTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 selected_models({'models': invalid})
 
-    def test_multiple_questions_queue_per_model_and_run_models_in_parallel(self):
+    def test_one_question_per_model_and_idle_model_takes_next_question(self):
         class BlockingProvider(FakeProvider):
             def __init__(self):
                 super().__init__('deepseek')
@@ -80,16 +80,17 @@ class CtrlTests(unittest.TestCase):
         self.assertTrue(deepseek.entered.wait(1))
         second = ctrl.start({'text': '第二题', 'models': ['deepseek', 'gemini']})
         ctrl.model_pools['gemini'].submit(lambda: None).result(timeout=3)
-        self.assertEqual(len(gemini.calls), 2)
+        self.assertEqual(len(gemini.calls), 1)
         self.assertEqual(len(deepseek.calls), 0)
-        self.assertEqual(jobs.get(second['id'])['results']['deepseek']['state'], 'queued')
+        self.assertEqual(set(jobs.get(second['id'])['results']), {'gemini'})
         self.assertEqual(len(ctrl.list_tasks()), 2)
         deepseek.release.set()
         ctrl.wait_idle()
         self.assertEqual(jobs.get(first['id'])['state'], 'completed')
         self.assertEqual(jobs.get(second['id'])['state'], 'completed')
         self.assertIn('第一题', deepseek.calls[0][0])
-        self.assertIn('第二题', deepseek.calls[1][0])
+        self.assertIn('第二题', gemini.calls[0][0])
+        self.assertEqual(len(deepseek.calls), 1)
         ctrl.shutdown()
         jobs.pool.shutdown(wait=True)
 
@@ -154,7 +155,7 @@ class CtrlTests(unittest.TestCase):
         self.assertIn('https://wjw.fujian.gov.cn/', [site['url'] for site in known])
         self.assertIn('https://www.nhc.gov.cn/', [site['url'] for site in known])
 
-    def test_dual_screenshot_ocr_then_route_and_independent_answer(self):
+    def test_screenshot_and_answer_stay_with_one_assignee(self):
         providers = {name: FakeProvider(name) for name in ('gemini', 'deepseek')}
         jobs = server.Jobs(providers)
         ctrl = MultiCtrlJobs(jobs, server.read_input)
@@ -170,14 +171,16 @@ class CtrlTests(unittest.TestCase):
         ctrl.wait_idle(); jobs.pool.shutdown(wait=True)
         result = jobs.get(job['id'])
         self.assertEqual(result['state'], 'completed')
-        self.assertEqual(set(result['results']), {'deepseek', 'gemini'})
+        self.assertEqual(set(result['results']), {'deepseek'})
         self.assertTrue(all(value['original'].startswith('下列哪项') for value in result['results'].values()))
-        self.assertEqual(len(followups), 2)
+        self.assertEqual(len(followups), 1)
         self.assertTrue(all(value[2].endswith('-receipt') for value in followups))
         jobs.pool = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=1)
         answer = ctrl.answer({'session': job['session'], 'models': ['gemini']})
         ctrl.wait_idle(); jobs.pool.shutdown(wait=True)
-        self.assertEqual(jobs.get(answer['id'])['results']['gemini']['answer'][:6], 'gemini')
+        self.assertTrue(jobs.get(answer['id'])['results']['deepseek']['answer'].startswith('deepseek'))
+        self.assertEqual(len(providers['gemini'].calls), 0)
+        ctrl.shutdown()
 
     def test_retry_recovers_existing_reply_without_resending(self):
         provider = FakeProvider('deepseek')
@@ -211,7 +214,7 @@ class CtrlTests(unittest.TestCase):
         self.assertEqual(retried['retried'], ['deepseek'])
         self.assertEqual(jobs.get(retried['id'])['state'], 'completed')
         self.assertEqual(len(providers['deepseek'].calls), 2)
-        self.assertEqual(len(providers['gemini'].calls), 1)
+        self.assertEqual(len(providers['gemini'].calls), 0)
 
     def test_retry_running_job_reattaches_without_second_submission(self):
         jobs = server.Jobs({'gemini': FakeProvider('gemini'), 'deepseek': FakeProvider('deepseek')})
@@ -354,6 +357,5 @@ class CtrlTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
 
 

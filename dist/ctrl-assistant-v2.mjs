@@ -1,18 +1,21 @@
 import {formatErrorReport} from './assistant-core.mjs?v=7864357e60';
+import {bindImageCapture} from './capture-input.mjs?v=67d6498f62';
 const ids = ['connection','connection-detail','open-deepseek','open-gemini','route-deepseek','route-gemini',
-  'answer-deepseek','answer-gemini','question','pip-question','pip-start','pip-image-note','pip-remove-image',
+  'route-qwen','dispatch-state','assigned-model','qwen-settings','qwen-base','qwen-key','qwen-remember',
+  'qwen-save','qwen-status','question','pip-question','pip-start','pip-image-note','pip-remove-image',
   'image-input','auto-ocr','image-box','image-preview','remove-image','start','input-status','offline',
-  'ctrl-board','task-tabs','fast-answer','archive-task','float','refresh-card','retry-card','back','stage','progress',
+  'ctrl-board','task-tabs','fast-answer','archive-task','float','refresh-card','retry-card','rerun-card','back','stage','progress',
   'progress-fill','progress-label','elapsed','model-progress','route-tabs','answer-tabs','original-section',
   'original','view-image','copy-original','search-section','keywords','copy-keywords','sites','ask-answer',
   'answer','copy-answer','error','copy-error','pip-return','return-card','image-dialog','full-image','close-image'];
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
-const names = {deepseek:'DeepSeek', gemini:'Gemini'};
+const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash'};
 const boardHome = ui['ctrl-board'].parentElement;
 let csrf = '', pip = null, draftImage = null, selectedId = '', tasks = [], nextNumber = 1;
 let connectionState = {}, watchRunning = false;
 let tabSignature = '';
+let imageQueue = Promise.resolve(), renderSignature = '';
 const connecting = new Set();
 const selected = () => tasks.find(task => task.id === selectedId);
 const chosen = prefix => Object.keys(names).filter(name => ui[prefix+'-'+name].checked);
@@ -24,11 +27,15 @@ function persistSelection() { try { sessionStorage.setItem('ctrl-selected-task',
 function controls() {
   ui.start.disabled = !local; ui['pip-start'].disabled = !local;
   const task = selected();
-  ui['ask-answer'].disabled = !local || !task?.session || !originalOf(task) || task.answerPending;
+  const answering = task?.jobData && /answer$/.test(task.jobData.kind || '') && task.state === 'running';
+  ui['ask-answer'].disabled = !local || !task?.session || !task.assigned || !originalOf(task) || task.answerPending || answering;
+  ui['ask-answer'].textContent = answering ? '答案已入队 / 正在回答' : '询问本题模型';
   ui['refresh-card'].disabled = !local || !task?.session;
   const retryable = task && ((!task.session && task.state === 'failed') ||
     Object.values(task.jobData?.results || {}).some(value => value.state === 'failed'));
   ui['retry-card'].disabled = !local || !retryable || task.state === 'running' || task.retryPending;
+  ui['rerun-card'].disabled = ui['retry-card'].disabled;
+  ui['qwen-save'].disabled = !local || ui['qwen-save'].dataset.saving === 'true';
   ui['archive-task'].disabled = !local || !task || task.state === 'running';
   ui['pip-remove-image'].disabled = !draftImage;
 }
@@ -115,15 +122,20 @@ function drawProgress(task) {
     return sum+25;
   }, 0)/states.length) : 0;
   ui.progress.setAttribute('aria-valuenow',String(percent)); ui['progress-fill'].style.width = percent+'%';
-  ui['progress-label'].textContent = `${complete}/${states.length} 已完成`;
+  ui['progress-label'].textContent = job.state === 'running' ? (task.assigned ? names[task.assigned]+' 处理中' : '等待空闲模型') :
+    job.state === 'completed' ? '已完成' : '未完成';
   ui['model-progress'].replaceChildren(...Object.entries(job.results || {}).map(([name,value]) => {
     const badge = document.createElement('span'); badge.className = value.state === 'failed' ? 'failed' : '';
-    badge.textContent = `${names[name]} · ${value.state === 'completed' ? '完成' : value.state === 'failed' ? '失败' : value.stage || '排队中'}`;
+    badge.textContent = `${names[name] || '自动派单'} · ${value.state === 'completed' ? '完成' : value.state === 'failed' ? '失败' : value.stage || '排队中'}`;
     return badge;
   }));
 }
 function drawSelected() {
   const task = selected(); drawTaskTabs(); drawProgress(task);
+  ui['assigned-model'].textContent = task?.assigned ? '本题由 '+names[task.assigned]+' 负责' : '自动分配给空闲模型';
+  const signature = JSON.stringify([task?.id,task?.data,task?.jobData?.results,task?.state,task?.error,task?.hadImage]);
+  if (signature === renderSignature) { controls(); return; }
+  renderSignature = signature;
   if (!task) {
     for (const id of ['original-section','search-section','route-tabs','answer-tabs','answer','copy-answer']) ui[id].hidden = true;
     stage('连续粘贴题目，点击上方窄标签切换。'); error(''); controls(); return;
@@ -155,7 +167,7 @@ function drawSelected() {
   drawModelTabs(ui['route-tabs'],task,'route',task.routeSelected,name => task.routeSelected = name);
   drawModelTabs(ui['answer-tabs'],task,'answer',task.answerSelected,name => task.answerSelected = name);
   const job = task.jobData;
-  if (job?.state === 'running') stage(Object.entries(job.results || {}).map(([name,item]) => `${names[name]}：${item.stage || '处理中'}`).join('；'));
+  if (job?.state === 'running') stage(Object.entries(job.results || {}).map(([name,item]) => `${names[name] || '自动派单'}：${item.stage || '处理中'}`).join('；'));
   else if (task.state === 'failed') stage('当前题未完成；可以点击重试。');
   else stage(task.state === 'completed' ? '当前题已就绪，可复制或打开检索网站。' : '当前题排队处理中；可以继续粘贴下一题。');
   const failures = Object.entries(job?.results || {}).filter(([,value]) => value.state === 'failed');
@@ -168,15 +180,20 @@ async function loadTask(task) {
     const session = await api('ctrl/session?id='+encodeURIComponent(task.session));
     task.data = session.models; task.title = (session.original || task.title || '截图识别中').replace(/\s+/g,' ').slice(0,45);
     task.state = session.state; task.job = session.job; task.error = '';
-    task.jobData = {id:session.job,state:session.state,results:session.activity,started_at:session.started_at};
+    task.assigned = session.assigned;
+    task.jobData = {id:session.job,kind:session.kind,state:session.state,results:session.activity,started_at:session.started_at};
+    task.routeSelected ||= session.assigned || '';
     task.routeSelected ||= Object.keys(names).find(name => task.data[name]?.route) || '';
     task.answerSelected ||= Object.keys(names).find(name => task.data[name]?.answer) || '';
     if (task.id === selectedId) drawSelected();
   } catch (e) { task.error = e.message; if (task.id === selectedId) drawSelected(); }
 }
-function selectTask(id) {
+async function selectTask(id) {
+  const view = ui['ctrl-board'].ownerDocument.defaultView;
+  if (selected()) selected().scrollY = view.scrollY;
   selectedId = id; persistSelection(); drawSelected();
-  const task = selected(); if (task?.session) loadTask(task);
+  const task = selected(); if (task?.session) await loadTask(task);
+  if (selectedId === id) view.scrollTo({top: task?.scrollY || 0, behavior:'instant'});
 }
 function clearDraft() {
   draftImage = null; ui.question.value = ''; ui['pip-question'].value = '';
@@ -185,7 +202,7 @@ function clearDraft() {
 }
 async function submitCapture(text, image) {
   if (!local || (!text.trim() && !image)) { error('请粘贴原题文字或截图。'); return; }
-  const models = chosen('route'); if (!models.length) { error('至少选择一个识题模型。'); return; }
+  const models = chosen('route'); if (!models.length) { error('至少启用一个自动派单模型。'); return; }
   const task = {id:'pending-'+crypto.randomUUID(),number:nextNumber++,session:'',job:'',image,
     inputText:text,models,fastAnswer:ui['fast-answer'].checked,intakeAt:Date.now(),
     hadImage:!!image,title:text.trim().replace(/\s+/g,' ').slice(0,45) || '截图识别中',
@@ -208,7 +225,7 @@ async function loadImage(file) {
   }
   const value = await new Promise((resolve,reject) => { const reader = new FileReader();
     reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
-  if (ui['auto-ocr'].checked && local) { submitCapture(ui.question.value.trim(),value); return; }
+  if (ui['auto-ocr'].checked && local) { await submitCapture('',value); return; }
   draftImage = value; ui['image-preview'].src = value; ui['image-box'].hidden = false;
   ui['pip-image-note'].textContent = '截图待提交'; ui['pip-remove-image'].hidden = false;
   ui['input-status'].textContent = '截图已载入，按 Enter 提交新题。'; controls();
@@ -218,6 +235,7 @@ async function watch() {
   while (watchRunning) {
     try {
       const listing = await api('ctrl/tasks');
+      drawDispatch(listing.dispatch);
       for (const entry of listing.tasks) {
         let task = tasks.find(value => value.session === entry.session || value.id === entry.client_id);
         if (!task) { task = {id:entry.session,number:nextNumber++,session:entry.session,job:entry.job,
@@ -227,6 +245,7 @@ async function watch() {
         task.title = entry.title || task.title; task.state = entry.state; task.job = entry.job;
         task.ready = entry.ready; task.hasOriginal = entry.has_original;
         task.hasFailure = entry.has_failure;
+        task.assigned = entry.assigned;
       }
       const serverIds = new Set(listing.tasks.map(entry => entry.session));
       tasks = tasks.filter(task => !task.session || serverIds.has(task.session) ||
@@ -246,27 +265,24 @@ ui['pip-start'].addEventListener('click', () => { ui['pip-question'].blur(); ui.
 ui.question.addEventListener('input', () => ui['pip-question'].value = ui.question.value);
 ui['pip-question'].addEventListener('input', () => ui.question.value = ui['pip-question'].value);
 for (const box of [ui.question,ui['pip-question']]) {
-  box.addEventListener('paste', event => { const item = [...event.clipboardData.items].find(value =>
-    ['image/png','image/jpeg'].includes(value.type)); if (item) { event.preventDefault(); loadImage(item.getAsFile()); } });
   box.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing && !event.shiftKey &&
     !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); ui.start.click(); } });
 }
-ui['image-input'].addEventListener('change',event => { if (event.target.files[0]) loadImage(event.target.files[0]); });
-for (const zone of [document,ui['pip-question'].parentElement]) {
-  zone.addEventListener('dragover',event => { if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault(); });
-  zone.addEventListener('drop',event => { if (![...(event.dataTransfer?.types || [])].includes('Files')) return;
-    event.preventDefault(); if (event.dataTransfer.files[0]) loadImage(event.dataTransfer.files[0]); });
+function enqueueImage(file) {
+  imageQueue = imageQueue.then(() => loadImage(file)).catch(e => error('截图读取失败：'+e.message));
+  return imageQueue;
 }
+bindImageCapture(document, enqueueImage, e => error(e.message));
+ui['image-input'].addEventListener('change',event => { if (event.target.files[0]) enqueueImage(event.target.files[0]); });
 ui['remove-image'].addEventListener('click',clearDraft);
 ui['pip-remove-image'].addEventListener('click',clearDraft);
 ui['auto-ocr'].checked = localStorage.getItem('ctrl-auto-ocr') !== 'false';
 ui['auto-ocr'].addEventListener('change',() => localStorage.setItem('ctrl-auto-ocr',String(ui['auto-ocr'].checked)));
-ui['fast-answer'].checked = localStorage.getItem('ctrl-fast-answer') === 'true';
-ui['fast-answer'].addEventListener('change',() => localStorage.setItem('ctrl-fast-answer',String(ui['fast-answer'].checked)));
+ui['fast-answer'].checked = localStorage.getItem('ctrl-auto-answer-v3') === 'true';
+ui['fast-answer'].addEventListener('change',() => localStorage.setItem('ctrl-auto-answer-v3',String(ui['fast-answer'].checked)));
 ui['ask-answer'].addEventListener('click',async () => { const task = selected(); if (!task?.session || !originalOf(task)) return;
-  const models = chosen('answer'); if (!models.length) { error('至少选择一个作答模型。'); return; }
   task.answerPending = true; controls(); task.error = '';
-  try { const started = await api('ctrl/answer',{session:task.session,models}); task.job = started.id;
+  try { const started = await api('ctrl/answer',{session:task.session}); task.job = started.id;
     task.state = 'running'; await loadTask(task); }
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.answerPending = false; controls(); }
@@ -281,16 +297,18 @@ ui['archive-task'].addEventListener('click',async () => {
     drawSelected(); if (selected()) await loadTask(selected()); }
   catch(e) { error(e.message); }
 });
-ui['retry-card'].addEventListener('click',async () => { const task = selected(); if (!task || task.retryPending) return;
+async function retrySelected(mode='read_first') { const task = selected(); if (!task || task.retryPending) return;
   task.retryPending = true; controls(); task.error = '';
-  try { const result = task.session ? await api('ctrl/retry',{job:task.job}) :
+  try { const result = task.session ? await api('ctrl/retry',{job:task.job,mode}) :
       await api('ctrl/start',{text:task.inputText,image:task.image,models:task.models,
         fast_answer:task.fastAnswer,client_id:task.id});
     task.session = result.session; task.job = result.id;
     task.state = 'running'; await loadTask(task); }
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.retryPending = false; controls(); }
-});
+}
+ui['retry-card'].addEventListener('click',() => retrySelected());
+ui['rerun-card'].addEventListener('click',() => { ui['rerun-card'].closest('details').open=false; retrySelected('restart'); });
 ui['copy-original'].addEventListener('click',() => copy(originalOf(selected())));
 ui['copy-keywords'].addEventListener('click',() => copy((selected()?.data?.[selected()?.routeSelected]?.route?.keywords || []).join(' ')));
 ui['copy-answer'].addEventListener('click',() => copy(selected()?.data?.[selected()?.answerSelected]?.answer || ''));
@@ -318,9 +336,16 @@ ui['return-card'].addEventListener('click',() => pip?.close());
 ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; }
   if (!window.documentPictureInPicture) { error('此浏览器不支持置顶小窗。'); return; }
   try { pip = await documentPictureInPicture.requestWindow({width:480,height:700});
-    const style = pip.document.createElement('link'); style.rel='stylesheet';
-    style.href=document.querySelector('link[rel=stylesheet]').href; pip.document.head.append(style);
+    try {
+      const sheet = new pip.CSSStyleSheet();
+      sheet.replaceSync([...document.styleSheets].flatMap(sheet => [...sheet.cssRules].map(rule => rule.cssText)).join('\n'));
+      pip.document.adoptedStyleSheets = [sheet];
+    } catch {
+      const style = pip.document.createElement('link'); style.rel='stylesheet';
+      style.href=document.querySelector('link[rel=stylesheet]').href; pip.document.head.append(style);
+    }
     pip.document.title='CTRL 检索卡片'; pip.document.body.className='pip-body';
+    bindImageCapture(pip.document, enqueueImage, e => error(e.message));
     pip.document.body.append(ui['ctrl-board']); ui['pip-return'].hidden=false;
     ui.float.textContent='收回小窗';
     pip.addEventListener('pagehide',() => { boardHome.prepend(ui['ctrl-board']); pip=null;
@@ -330,9 +355,37 @@ ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; 
 async function refreshConnections() { const statuses = await Promise.all(Object.keys(names).map(async name => {
   try { return {name,...await api('status?model='+name)}; } catch(e) { return {name,status:'error',detail:e.message}; }
 })); connectionState = Object.fromEntries(statuses.map(value => [value.name,value.status]));
-  ui.connection.textContent = statuses.map(value => `${names[value.name]}${value.status === 'ready' ? ' 已连接' : value.status === 'login_required' ? ' 需登录' : ' 未连接'}`).join(' · ');
+  ui.connection.textContent = statuses.map(value => `${names[value.name]}${value.status === 'ready' ? ' 已连接' : value.status === 'not_configured' ? ' 未配置' : value.status === 'login_required' ? ' 需登录' : ' 未连接'}`).join(' · ');
   ui['connection-detail'].textContent = statuses.map(value => value.detail || '').filter(Boolean).join('；');
   return connectionState; }
+function drawDispatch(snapshot) {
+  if (!snapshot) return;
+  ui['dispatch-state'].textContent = Object.entries(snapshot.models || {}).filter(([name]) => chosen('route').includes(name))
+    .map(([name,value]) => `${names[name]} ${value.busy ? '处理中' : value.ready ? '空闲' : '需连接'}`).join(' · ')+
+    (snapshot.waiting ? ` · 等待 ${snapshot.waiting} 项` : '');
+}
+function setQwenConfig(config) {
+  ui['qwen-base'].value = config.base_url || '';
+  ui['qwen-remember'].checked = !!config.remembered;
+  ui['route-qwen'].disabled = !config.configured;
+  if (!config.configured) ui['route-qwen'].checked = false;
+  ui['qwen-status'].textContent = config.detail || (config.configured ?
+    '已配置 qwen3.8-flash；可加入自动派单。实际可用性以调用结果为准。' : '未配置，填写后才能启用千问。');
+}
+async function loadQwenConfig() {
+  try { setQwenConfig(await api('ctrl/qwen-config')); }
+  catch (e) { ui['qwen-status'].textContent = e.message; ui['route-qwen'].disabled = true; }
+}
+ui['qwen-save'].addEventListener('click', async () => {
+  ui['qwen-save'].dataset.saving = 'true'; ui['qwen-save'].disabled = true;
+  try {
+    const config = await api('ctrl/qwen-config', {model:'qwen3.8-flash', base_url:ui['qwen-base'].value.trim(),
+      api_key:ui['qwen-key'].value.trim(), remember:ui['qwen-remember'].checked});
+    ui['qwen-key'].value = ''; setQwenConfig(config); ui['route-qwen'].checked = true;
+    await refreshConnections();
+  } catch (e) { ui['qwen-status'].textContent = e.message; }
+  finally { ui['qwen-save'].dataset.saving = 'false'; controls(); }
+});
 async function connectModel(name) { if (!local || !csrf || connecting.has(name)) return;
   connecting.add(name); ui['open-'+name].disabled=true; ui['connection-detail'].textContent=`正在连接 ${names[name]}…`;
   try { const result=await api('browser/open',{model:name});
@@ -341,7 +394,7 @@ async function connectModel(name) { if (!local || !csrf || connecting.has(name))
   catch(e) { ui['connection-detail'].textContent=`${names[name]} 连接失败：${e.message}，可重试。`; }
   finally { connecting.delete(name); ui['open-'+name].disabled=false; }
 }
-for (const name of Object.keys(names)) { ui['open-'+name].addEventListener('click',() => connectModel(name));
+for (const name of ['deepseek','gemini']) { ui['open-'+name].addEventListener('click',() => connectModel(name));
   ui['route-'+name].addEventListener('change',() => { if (ui['route-'+name].checked && connectionState[name] !== 'ready') connectModel(name); }); }
 async function init() { if (!local) { ui.offline.hidden=false; ui.connection.textContent='静态预览'; controls(); return; }
   try { const response=await fetch('/api/session',{cache:'no-store'}); if (!response.ok) throw Error('本机服务不可用');
@@ -352,9 +405,9 @@ async function init() { if (!local) { ui.offline.hidden=false; ui.connection.tex
       data:{deepseek:{},gemini:{}},routeSelected:'',answerSelected:'',error:''}); }
     selectedId=tasks.find(task => task.session === saved)?.id || tasks.at(-1)?.id || '';
     if (selected()) await loadTask(selected()); drawSelected(); watch();
-    refreshConnections().then(state => { for (const name of chosen('route')) if (state[name] !== 'ready') connectModel(name); }).catch(()=>{});
+    await loadQwenConfig();
+    refreshConnections().then(state => { for (const name of chosen('route')) if (name !== 'qwen' && state[name] !== 'ready') connectModel(name); }).catch(()=>{});
   } catch(e) { ui.connection.textContent='本机服务未连接'; ui['connection-detail'].textContent=e.message;
     ui.offline.hidden=false; }
   controls(); }
 init();
-

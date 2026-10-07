@@ -22,6 +22,7 @@ MAX_IMAGE = 5 * 1024 * 1024
 if str(ROOT / 'scripts') not in sys.path:
     sys.path.insert(0, str(ROOT / 'scripts'))
 from ctrl_multi import MultiCtrlJobs
+from qwen_api import QwenProvider
 
 
 def read_input(data):
@@ -247,7 +248,10 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     if name not in jobs.providers:
                         self.reply(400, {'error': '未知模型'})
                     else:
-                        self.reply(200, jobs.providers[name].status())
+                        status = jobs.providers[name].status()
+                        if ctrl_jobs:
+                            ctrl_jobs.dispatcher.set_ready(name, status['status'] == 'ready')
+                        self.reply(200, status)
                 elif path == '/api/ctrl/session' and ctrl_jobs:
                     try:
                         session_id = urlsplit(self.path).query.removeprefix('id=')
@@ -255,7 +259,9 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     except KeyError:
                         self.reply(404, {'error': 'CTRL 会话已过期，请重新提交题目'})
                 elif path == '/api/ctrl/tasks' and ctrl_jobs:
-                    self.reply(200, {'tasks': ctrl_jobs.list_tasks()})
+                    self.reply(200, {'tasks': ctrl_jobs.list_tasks(), 'dispatch': ctrl_jobs.dispatcher.snapshot()})
+                elif path == '/api/ctrl/qwen-config' and 'qwen' in jobs.providers:
+                    self.reply(200, jobs.providers['qwen'].public_config())
                 elif path == '/api/ctrl/image' and ctrl_jobs:
                     try:
                         session_id = urlsplit(self.path).query.removeprefix('id=')
@@ -291,6 +297,8 @@ def handler_for(jobs, session, ctrl_jobs=None):
                 if not 0 < size <= 7_200_000:
                     raise ValueError('请求过大或为空')
                 data = json.loads(self.rfile.read(size))
+                if not isinstance(data, dict):
+                    raise ValueError('需要参数对象')
                 if self.path == '/api/jobs':
                     self.reply(202, jobs.submit(data))
                 elif self.path == '/api/ctrl/start' and ctrl_jobs:
@@ -301,6 +309,13 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(202, ctrl_jobs.retry(data))
                 elif self.path == '/api/ctrl/archive' and ctrl_jobs:
                     self.reply(200, ctrl_jobs.archive(data))
+                elif self.path == '/api/ctrl/qwen-config' and ctrl_jobs and 'qwen' in jobs.providers:
+                    with ctrl_jobs.dispatcher.condition:
+                        if 'qwen' in ctrl_jobs.dispatcher.busy:
+                            raise RuntimeError('千问正在处理题目，请完成后再修改 API 配置')
+                        configured = jobs.providers['qwen'].configure(data)
+                        ctrl_jobs.dispatcher.set_ready('qwen', configured['configured'])
+                    self.reply(200, configured)
                 elif self.path == '/api/browser/open':
                     name = data.get('model', 'gemini')
                     if name not in jobs.providers:
@@ -323,8 +338,11 @@ def main():
     if not (default_root / 'src/evidence_chain/providers/ai/gemini_web.py').is_file():
         default_root = ROOT / 'vendor/evidence-chain'
     root = Path(os.environ.get('EVIDENCE_CHAIN_ROOT', default_root))
-    jobs = Jobs(load_provider(root))
+    providers = load_provider(root)
+    providers['qwen'] = QwenProvider(ROOT / '.runtime/qwen-config.dpapi')
+    jobs = Jobs(providers)
     ctrl_jobs = MultiCtrlJobs(jobs, read_input)
+    ctrl_jobs.dispatcher.set_ready('qwen', providers['qwen'].status()['status'] == 'ready')
     class Server(ThreadingHTTPServer):
         allow_reuse_address = False
         daemon_threads = True
@@ -336,9 +354,9 @@ def main():
         pass
     finally:
         server.server_close()
+        ctrl_jobs.shutdown(wait=False)
         jobs.pool.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == '__main__':
     main()
-
