@@ -63,6 +63,21 @@ class ApiTests(unittest.TestCase):
             self.assertNotIn('secret', result['detail'])
             self.assertEqual(opener.return_value.open.call_count, 1)
 
+    def test_reasoning_only_stream_reports_cause_without_using_it_as_answer(self):
+        stages = []
+        for finish, detail in [('length','达到输出上限'),('stop','只收到思考输出')]:
+            frames = [{'choices':[{'delta':{'reasoning_content':'fixture internal reasoning'},'finish_reason':None}]},
+                      {'choices':[{'delta':{},'finish_reason':finish}]}]
+            stream = io.BytesIO(('\n'.join('data: '+json.dumps(frame) for frame in frames)+'\ndata: [DONE]\n').encode())
+            with patch('qwen_api.build_opener') as opener:
+                opener.return_value.open.return_value = stream
+                result = self.provider.generate_with_progress('题目',None,stages.append)
+            self.assertEqual(result['status'],'failed')
+            self.assertIn(detail,result['detail'])
+            self.assertNotIn('fixture internal reasoning',str(result))
+            self.assertIsNone(self.provider.read_saved_reply(result['cleanup_receipt']))
+        self.assertTrue(any('正在思考' in value for value in stages))
+
     def test_config_is_not_exposed_and_only_official_https_endpoints_are_allowed(self):
         self.assertNotIn('api_key', self.provider.public_config())
         self.assertNotIn(self.config['api_key'], json.dumps(self.provider.status()))

@@ -22,14 +22,17 @@ class ReviewTests(unittest.TestCase):
         calls = []
         def request(config,messages,progress):
             calls.append(messages)
+            self.assertEqual(config['model'],'deepseek-v4-flash-0731')
             return {'status':'completed','text':'复核答案B'}
         self.intern._request = request
-        self.ctrl.reviews.submit({'session':session,'stage':'answer','model':'intern:deepseek-v4-flash-0731'})
+        submitted = self.ctrl.reviews.submit({'session':session,'stage':'answer','model':'intern:deepseek-v4-flash-0731'})
         self.ctrl.wait_idle()
         saved = self.ctrl.get_session(session)
         self.assertEqual(saved['models']['qwen']['answer'],'初始答案A')
         self.assertEqual(len(saved['versions']['answer']),2)
         self.assertEqual(saved['versions']['answer'][-1]['answer'],'复核答案B')
+        self.assertEqual(saved['versions']['answer'][-1]['requested_model'],'deepseek-v4-flash-0731')
+        self.assertEqual(saved['versions']['answer'][-1]['source_job'],submitted['id'])
         self.assertNotIn('初始答案A',str(calls))
         self.assertEqual(len(calls[0]),1)
 

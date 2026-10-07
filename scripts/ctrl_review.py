@@ -45,7 +45,7 @@ class Reviews:
             if not any(v['id'] == key for v in versions[stage]):
                 versions[stage].append({'id':key,'model':name,field:fields[field],
                     'based_on':job.get('based_on',session['original_revision']), 'created_at':time.time(),
-                    'actual_model':fields.get('actual_model')})
+                    'actual_model':fields.get('actual_model'),'requested_model':fields.get('requested_model')})
                 versions[stage][:] = versions[stage][-20:]
 
     def submit(self, data):
@@ -135,7 +135,7 @@ class Reviews:
                 context['guarded'] = hasattr(provider,'_transport')
                 progress = CtrlProgress(owner,job_id,name,context)
                 progress.api_config = run['config']
-                progress.api_options = {'enable_thinking':run['thinking']}
+                progress.api_options = {'thinking':run['thinking'],'effort':'low'}
                 result = provider.generate_with_progress(progress.prompt(prompt),path,progress)
                 context['receipt'] = result.get('cleanup_receipt')
                 if context['guarded']:
@@ -146,7 +146,8 @@ class Reviews:
                 run['usage'] = result.get('usage'); run['actual_model'] = result.get('model')
             value = {'id':uuid.uuid4().hex,'model':name,'choice':run['choice'],
                      'based_on':run['based_on'],'created_at':time.time(),
-                     'actual_model':run.get('actual_model'),'usage':run.get('usage')}
+                     'actual_model':run.get('actual_model'),'requested_model':(run.get('config') or {}).get('model'),
+                     'source_job':job_id,'usage':run.get('usage')}
             value['route' if stage == 'analysis' else 'answer' if stage == 'answer' else 'text'] = (
                 parse_route(text,run['original']) if stage == 'analysis' else text.strip()[:12000])
             with owner.jobs.lock:
@@ -154,7 +155,8 @@ class Reviews:
                 versions = self.seed(session)[stage]
                 versions.append(value); versions[:] = versions[-20:]
             owner._mark(job_id,name,state='completed',stage=labels[stage]+'复核完成',
-                        version=value['id'],completed_at=time.time())
+                        version=value['id'],actual_model=run.get('actual_model'),
+                        requested_model=value.get('requested_model'),completed_at=time.time())
             receipt = run['context'].get('receipt')
             if receipt:
                 try:

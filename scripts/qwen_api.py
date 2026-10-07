@@ -173,12 +173,13 @@ class QwenProvider:
 
     def _request(self, config, messages, progress):
         if not config['api_key']:
-            return {'status': 'failed', 'detail': '千问 API 尚未配置'}
-        progress('正在发送千问 API 请求')
+            return {'status': 'failed', 'detail': self.label+' 尚未配置'}
+        progress('正在发送'+self.label+'请求')
         body = json.dumps(self._payload(config, messages)).encode()
         request = Request(config['base_url']+'/chat/completions', data=body,
             headers={'Authorization': 'Bearer '+config['api_key'], 'Content-Type': 'application/json'})
         chunks, finish, received = [], None, False
+        reasoning_seen = False
         usage, actual_model = {}, config['model']
         started = time.monotonic()
         deadline = time.monotonic()+150
@@ -201,7 +202,10 @@ class QwenProvider:
                     if not choices:
                         continue
                     choice = choices[0]
-                    value = choice.get('delta', {}).get('content') or ''
+                    delta = choice.get('delta') or {}
+                    if delta.get('reasoning_content') and not reasoning_seen:
+                        reasoning_seen = True; progress(self.label+'正在思考，等待最终答案')
+                    value = delta.get('content') or ''
                     if value:
                         if not received:
                             progress(f'正在接收{self.label} API 回复')
@@ -211,10 +215,14 @@ class QwenProvider:
                         if callback:
                             callback(''.join(chunks))
                     finish = choice.get('finish_reason') or finish
+            if finish == 'length':
+                return {'status':'failed','detail': self.label+'达到输出上限，'+('思考尚未结束或最终答案被截断' if reasoning_seen else '最终答案被截断')+'；可换模型复核或手动重试'}
+            if not ''.join(chunks).strip() and reasoning_seen:
+                return {'status':'failed','detail': self.label+'只收到思考输出，没有完整最终答案；可换模型复核或手动重试'}
             if finish != 'stop' or not ''.join(chunks).strip():
                 return {'status': 'failed', 'detail': 'API 回复中断或被截断，未采用不完整结果；可手动重试'}
             return {'status': 'completed', 'text': ''.join(chunks), 'usage': usage,
-                    'model': actual_model, 'request_seconds': round(time.monotonic()-started, 3)}
+                    'model': actual_model, 'requested_model':config['model'], 'request_seconds': round(time.monotonic()-started, 3)}
         except HTTPError as exc:
             label = {401: 'API Key 无效', 403: '模型或地域权限不足', 429: '请求限流或额度不足'}.get(
                 exc.code, '服务暂时无法完成请求')

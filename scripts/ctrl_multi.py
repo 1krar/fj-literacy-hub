@@ -420,7 +420,7 @@ class MultiCtrlJobs:
         model['phase'] = 'route_done'
         self._mark(job_id, name, state='completed', original=original, route=route, answer=model['answer'],
                    usage=result.get('usage'), request_seconds=result.get('request_seconds'),
-                   actual_model=result.get('model'), stage='检索建议已返回', completed_at=time.time())
+                   actual_model=result.get('model'), requested_model=result.get('requested_model'), stage='检索建议已返回', completed_at=time.time())
 
     def _start_api_model(self, job_id, session_id, name, text, path):
         session = self.sessions[session_id]
@@ -482,7 +482,7 @@ class MultiCtrlJobs:
             model['phase'] = 'route_done'
             self._mark(job_id, name, state='completed', original=model['original'], route=route,
                        answer=model['answer'], usage=result.get('usage'), request_seconds=result.get('request_seconds'),
-                       actual_model=result.get('model'), stage='原题和检索建议已返回', completed_at=time.time())
+                       actual_model=result.get('model'), requested_model=result.get('requested_model'), stage='原题和检索建议已返回', completed_at=time.time())
         except Exception as exc:
             self._mark(job_id, name, state='failed', original=model['original'], error=str(exc)[:400],
                        stage='API 未完成，已保留原题', completed_at=time.time())
@@ -728,7 +728,7 @@ class MultiCtrlJobs:
             model['phase'] = 'answer_done'
             self._mark(job_id, name, state='completed', stage='答案已返回',
                        answer=model['answer'], usage=result.get('usage'), request_seconds=result.get('request_seconds'),
-                       actual_model=result.get('model'), completed_at=time.time())
+                       actual_model=result.get('model'), requested_model=result.get('requested_model'), completed_at=time.time())
         except Exception as exc:
             transport = getattr(self.providers[name], '_transport', None)
             receipt = getattr(transport, '_last_request_receipt', None)
