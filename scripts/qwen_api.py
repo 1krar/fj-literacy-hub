@@ -61,10 +61,15 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class QwenProvider:
+    is_api = True
+    default_base = DEFAULT_BASE
+    default_model = DEFAULT_MODEL
+    label = '千问'
+
     def __init__(self, config_path):
         self.path = Path(config_path)
         self.lock = threading.RLock()
-        self.config = {'base_url': DEFAULT_BASE, 'model': DEFAULT_MODEL, 'api_key': ''}
+        self.config = {'base_url': self.default_base, 'model': self.default_model, 'api_key': ''}
         self.chats = {}
         self.remembered = False
         self.load_error = ''
@@ -75,7 +80,7 @@ class QwenProvider:
                 self.remembered = True
             except Exception:
                 self.load_error = '加密配置无法读取，请重新填写 API 配置'
-        if os.environ.get('LITERACY_QWEN_API_KEY'):
+        if self.label == '千问' and os.environ.get('LITERACY_QWEN_API_KEY'):
             try:
                 self.config = self._validated({'api_key': os.environ['LITERACY_QWEN_API_KEY'],
                     'base_url': os.environ.get('LITERACY_QWEN_BASE_URL', ''),
@@ -132,7 +137,12 @@ class QwenProvider:
             content = [{'type': 'text', 'text': prompt}, {'type': 'image_url', 'image_url': {
                 'url': 'data:'+mime+';base64,'+base64.b64encode(path.read_bytes()).decode()}}]
         with self.lock:
-            self.chats[receipt] = {'messages': [], 'last': None}
+            self.chats[receipt] = {'messages': [], 'last': None, 'raw': None,
+                                   'config': dict(getattr(progress, 'api_config', self.config)), 'lock': threading.RLock()}
+        model_snapshot = getattr(progress, 'api_options', {})
+        with self.lock:
+            if model_snapshot:
+                self.chats[receipt]['config'].update(model_snapshot)
         return self.continue_saved(receipt, content, progress)
 
     def continue_saved(self, receipt, prompt, progress):
@@ -140,26 +150,37 @@ class QwenProvider:
             if receipt not in self.chats:
                 raise RuntimeError('API 原题上下文已过期，请重新提交题目')
             chat = self.chats[receipt]
+        # Serialize writes to one conversation, while independent tasks stay parallel.
+        with chat['lock']:
             messages = chat['messages'] + [{'role': 'user', 'content': prompt}]
             chat['last'] = None
-            config = dict(self.config)
-        result = self._request(config, messages, progress)
-        result['cleanup_receipt'] = receipt
-        with self.lock:
+            config = dict(chat['config'])
+            result = self._request(config, messages, progress)
+            result['cleanup_receipt'] = receipt
             if result['status'] == 'completed':
                 chat['messages'] = messages + [{'role': 'assistant', 'content': result['text']}]
                 chat['last'] = result['text']
+            chat['raw'] = result.get('text')
         return result
+
+    def _payload(self, config, messages):
+        body = {'model': config['model'], 'messages': messages,
+                'enable_thinking': config.get('thinking', False), 'max_tokens': 4096,
+                'stream': True, 'stream_options': {'include_usage': True}}
+        if config.get('thinking') and config.get('effort'):
+            body['reasoning_effort'] = config['effort']
+        return body
 
     def _request(self, config, messages, progress):
         if not config['api_key']:
             return {'status': 'failed', 'detail': '千问 API 尚未配置'}
         progress('正在发送千问 API 请求')
-        body = json.dumps({'model': config['model'], 'messages': messages,
-            'enable_thinking': False, 'max_tokens': 4096, 'stream': True}).encode()
+        body = json.dumps(self._payload(config, messages)).encode()
         request = Request(config['base_url']+'/chat/completions', data=body,
             headers={'Authorization': 'Bearer '+config['api_key'], 'Content-Type': 'application/json'})
         chunks, finish, received = [], None, False
+        usage, actual_model = {}, config['model']
+        started = time.monotonic()
         deadline = time.monotonic()+150
         try:
             with build_opener(NoRedirect()).open(request, timeout=45) as response:
@@ -172,6 +193,8 @@ class QwenProvider:
                     if raw == b'[DONE]':
                         break
                     item = json.loads(raw)
+                    usage = item.get('usage') or usage
+                    actual_model = item.get('model') or actual_model
                     if item.get('error'):
                         return {'status': 'failed', 'detail': 'API 返回错误，请检查模型权限与额度'}
                     choices = item.get('choices') or []
@@ -181,17 +204,21 @@ class QwenProvider:
                     value = choice.get('delta', {}).get('content') or ''
                     if value:
                         if not received:
-                            progress('正在接收千问 API 回复')
+                            progress(f'正在接收{self.label} API 回复')
                             received = True
                         chunks.append(value)
+                        callback = getattr(progress, 'on_text', None)
+                        if callback:
+                            callback(''.join(chunks))
                     finish = choice.get('finish_reason') or finish
             if finish != 'stop' or not ''.join(chunks).strip():
                 return {'status': 'failed', 'detail': 'API 回复中断或被截断，未采用不完整结果；可手动重试'}
-            return {'status': 'completed', 'text': ''.join(chunks)}
+            return {'status': 'completed', 'text': ''.join(chunks), 'usage': usage,
+                    'model': actual_model, 'request_seconds': round(time.monotonic()-started, 3)}
         except HTTPError as exc:
             label = {401: 'API Key 无效', 403: '模型或地域权限不足', 429: '请求限流或额度不足'}.get(
                 exc.code, '服务暂时无法完成请求')
-            return {'status': 'failed', 'detail': f'千问 API {exc.code}：{label}；未自动重发'}
+            return {'status': 'failed', 'detail': f'{self.label} API {exc.code}：{label}；未自动重发'}
         except (URLError, TimeoutError, OSError, ValueError):
             return {'status': 'failed', 'detail': 'API 网络或响应异常，未确认完整回复；未自动重发，可手动重试'}
 

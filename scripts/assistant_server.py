@@ -23,6 +23,7 @@ if str(ROOT / 'scripts') not in sys.path:
     sys.path.insert(0, str(ROOT / 'scripts'))
 from ctrl_multi import MultiCtrlJobs
 from qwen_api import QwenProvider
+from intern_api import InternProvider
 
 
 def read_input(data):
@@ -262,6 +263,8 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(200, {'tasks': ctrl_jobs.list_tasks(), 'dispatch': ctrl_jobs.dispatcher.snapshot()})
                 elif path == '/api/ctrl/qwen-config' and 'qwen' in jobs.providers:
                     self.reply(200, jobs.providers['qwen'].public_config())
+                elif path == '/api/ctrl/intern-config' and 'intern' in jobs.providers:
+                    self.reply(200, jobs.providers['intern'].public_config())
                 elif path == '/api/ctrl/image' and ctrl_jobs:
                     try:
                         session_id = urlsplit(self.path).query.removeprefix('id=')
@@ -309,12 +312,11 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(202, ctrl_jobs.retry(data))
                 elif self.path == '/api/ctrl/archive' and ctrl_jobs:
                     self.reply(200, ctrl_jobs.archive(data))
-                elif self.path == '/api/ctrl/qwen-config' and ctrl_jobs and 'qwen' in jobs.providers:
+                elif self.path in ('/api/ctrl/qwen-config', '/api/ctrl/intern-config') and ctrl_jobs:
+                    api_name = 'intern' if self.path.endswith('intern-config') else 'qwen'
                     with ctrl_jobs.dispatcher.condition:
-                        if 'qwen' in ctrl_jobs.dispatcher.busy:
-                            raise RuntimeError('千问正在处理题目，请完成后再修改 API 配置')
-                        configured = jobs.providers['qwen'].configure(data)
-                        ctrl_jobs.dispatcher.set_ready('qwen', configured['configured'])
+                        configured = jobs.providers[api_name].configure(data)
+                        ctrl_jobs.dispatcher.set_ready(api_name, configured['configured'])
                     self.reply(200, configured)
                 elif self.path == '/api/browser/open':
                     name = data.get('model', 'gemini')
@@ -333,6 +335,7 @@ def handler_for(jobs, session, ctrl_jobs=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8771)
+    parser.add_argument('--restore-completed', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     default_root = ROOT.parent / 'evidence-chain'
     if not (default_root / 'src/evidence_chain/providers/ai/gemini_web.py').is_file():
@@ -340,9 +343,16 @@ def main():
     root = Path(os.environ.get('EVIDENCE_CHAIN_ROOT', default_root))
     providers = load_provider(root)
     providers['qwen'] = QwenProvider(ROOT / '.runtime/qwen-config.dpapi')
+    providers['intern'] = InternProvider(ROOT / '.runtime/intern-config.dpapi')
     jobs = Jobs(providers)
     ctrl_jobs = MultiCtrlJobs(jobs, read_input)
+    if args.restore_completed:
+        handover = args.restore_completed.resolve()
+        if not handover.is_relative_to((ROOT / '.runtime').resolve()):
+            raise ValueError('升级交接文件必须保存在本机 .runtime 目录')
+        ctrl_jobs.restore_completed(json.loads(handover.read_text(encoding='utf-8')))
     ctrl_jobs.dispatcher.set_ready('qwen', providers['qwen'].status()['status'] == 'ready')
+    ctrl_jobs.dispatcher.set_ready('intern', providers['intern'].status()['status'] == 'ready')
     class Server(ThreadingHTTPServer):
         allow_reuse_address = False
         daemon_threads = True

@@ -1,6 +1,6 @@
 import {formatErrorReport} from './assistant-core.mjs?v=7864357e60';
 import {bindImageCapture} from './capture-input.mjs?v=67d6498f62';
-const ids = ['connection','connection-detail','open-deepseek','open-gemini','route-deepseek','route-gemini',
+const ids = ['call-mode','ocr-model','analysis-model','answer-model','answer-thinking','route-intern','intern-base','intern-model','intern-key','intern-remember','intern-save','intern-status','connection','connection-detail','open-deepseek','open-gemini','route-deepseek','route-gemini',
   'route-qwen','dispatch-state','assigned-model','qwen-settings','qwen-base','qwen-key','qwen-remember',
   'qwen-save','qwen-status','question','pip-question','pip-start','pip-image-note','pip-remove-image',
   'image-input','auto-ocr','image-box','image-preview','remove-image','start','input-status','offline',
@@ -10,7 +10,7 @@ const ids = ['connection','connection-detail','open-deepseek','open-gemini','rou
   'answer','copy-answer','error','copy-error','pip-return','return-card','image-dialog','full-image','close-image'];
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
-const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash'};
+const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash', intern:'书生 API'};
 const defaultQwenBase = 'https://maas.qianwenaiapi.com/compatible-mode/v1';
 const boardHome = ui['ctrl-board'].parentElement;
 let csrf = '', pip = null, draftImage = null, selectedId = '', tasks = [], nextNumber = 1;
@@ -19,7 +19,7 @@ let tabSignature = '';
 let imageQueue = Promise.resolve(), renderSignature = '';
 const connecting = new Set();
 const selected = () => tasks.find(task => task.id === selectedId);
-const chosen = prefix => Object.keys(names).filter(name => ui[prefix+'-'+name].checked);
+const chosen = prefix => Object.keys(names).filter(name => ui[prefix+'-'+name].checked && (ui['call-mode'].value === 'api' ? ['qwen','intern'].includes(name) : ['deepseek','gemini'].includes(name))); 
 const originalOf = task => task?.data?.[task.routeSelected]?.original ||
   Object.values(task?.data || {}).find(value => value.original)?.original || '';
 function stage(message) { ui.stage.textContent = message; ui['input-status'].textContent = message; }
@@ -30,7 +30,7 @@ function controls() {
   const task = selected();
   const answering = task?.jobData && /answer$/.test(task.jobData.kind || '') && task.state === 'running';
   ui['ask-answer'].disabled = !local || !task?.session || !task.assigned || !originalOf(task) || task.answerPending || answering;
-  ui['ask-answer'].textContent = answering ? '答案已入队 / 正在回答' : '询问本题模型';
+  ui['ask-answer'].textContent = answering ? '答案已入队 / 正在回答' : '问答案';
   ui['refresh-card'].disabled = !local || !task?.session;
   const retryable = task && ((!task.session && task.state === 'failed') ||
     Object.values(task.jobData?.results || {}).some(value => value.state === 'failed'));
@@ -115,14 +115,11 @@ function drawProgress(task) {
   ui.elapsed.textContent = '已用 '+seconds+' 秒';
   const states = Object.values(job.results || {});
   const complete = states.filter(value => value.state === 'completed').length;
-  const percent = states.length ? Math.round(states.reduce((sum, value) => {
-    if (['completed','failed'].includes(value.state)) return sum+100;
-    if (value.state === 'queued') return sum+5;
-    if (/同一对话|等待完整回复|已发送/.test(value.stage || '')) return sum+76;
-    if (/原题已识别|关键词|网站/.test(value.stage || '')) return sum+55;
-    return sum+25;
-  }, 0)/states.length) : 0;
-  ui.progress.setAttribute('aria-valuenow',String(percent)); ui['progress-fill'].style.width = percent+'%';
+  const finished = job.state !== 'running';
+  ui.progress.toggleAttribute('data-running', !finished);
+  ui.progress.removeAttribute('aria-valuenow');
+  ui.progress.setAttribute('aria-valuetext', finished ? '处理结束' : '正在处理，耗时未知');
+  ui['progress-fill'].style.width = finished ? '100%' : '35%';
   ui['progress-label'].textContent = job.state === 'running' ? (task.assigned ? names[task.assigned]+' 处理中' : '等待空闲模型') :
     job.state === 'completed' ? '已完成' : '未完成';
   ui['model-progress'].replaceChildren(...Object.entries(job.results || {}).map(([name,value]) => {
@@ -133,7 +130,9 @@ function drawProgress(task) {
 }
 function drawSelected() {
   const task = selected(); drawTaskTabs(); drawProgress(task);
-  ui['assigned-model'].textContent = task?.assigned ? '本题由 '+names[task.assigned]+' 负责' : '自动分配给空闲模型';
+  ui['assigned-model'].textContent = task?.assigned ? '识题：'+names[task.assigned] : '自动分配给空闲模型';
+  ui['answer-model'].value = task?.answerChoice || '';
+  ui['answer-thinking'].checked = !!task?.answerThinking;
   const signature = JSON.stringify([task?.id,task?.data,task?.jobData?.results,task?.state,task?.error,task?.hadImage]);
   if (signature === renderSignature) { controls(); return; }
   renderSignature = signature;
@@ -183,7 +182,8 @@ async function loadTask(task) {
     task.state = session.state; task.job = session.job; task.error = '';
     task.assigned = session.assigned;
     task.jobData = {id:session.job,kind:session.kind,state:session.state,results:session.activity,started_at:session.started_at};
-    task.routeSelected ||= session.assigned || '';
+    if (!task.data[task.routeSelected]?.route) task.routeSelected = Object.keys(names).find(name => task.data[name]?.route) || session.assigned || '';
+    task.answerSelected = Object.keys(session.activity || {}).find(name => session.activity[name].answer) || task.answerSelected;
     task.routeSelected ||= Object.keys(names).find(name => task.data[name]?.route) || '';
     task.answerSelected ||= Object.keys(names).find(name => task.data[name]?.answer) || '';
     if (task.id === selectedId) drawSelected();
@@ -205,13 +205,13 @@ async function submitCapture(text, image) {
   if (!local || (!text.trim() && !image)) { error('请粘贴原题文字或截图。'); return; }
   const models = chosen('route'); if (!models.length) { error('至少启用一个自动派单模型。'); return; }
   const task = {id:'pending-'+crypto.randomUUID(),number:nextNumber++,session:'',job:'',image,
-    inputText:text,models,fastAnswer:ui['fast-answer'].checked,intakeAt:Date.now(),
+    inputText:text,models,ocrModel:ui['ocr-model'].value,analysisModel:ui['analysis-model'].value,fastAnswer:ui['fast-answer'].checked,intakeAt:Date.now(),
     hadImage:!!image,title:text.trim().replace(/\s+/g,' ').slice(0,45) || '截图识别中',
     state:'running',pending:true,data:{deepseek:{},gemini:{}},routeSelected:'',answerSelected:'',error:''};
   tasks.push(task); if (!selectedId) selectedId = task.id;
   clearDraft(); drawSelected(); ui['input-status'].textContent = `第 ${task.number} 题已收下，可继续粘贴下一题。`;
   try {
-    const started = await api('ctrl/start',{text,image,models,fast_answer:task.fastAnswer,client_id:task.id});
+    const started = await api('ctrl/start',{text,image,models,fast_answer:task.fastAnswer,client_id:task.id,ocr_model:task.ocrModel,analysis_model:task.analysisModel});
     const duplicate = tasks.find(value => value !== task && value.session === started.session);
     if (duplicate) tasks.splice(tasks.indexOf(duplicate),1);
     task.session = started.session; task.job = started.id; task.pending = false;
@@ -281,9 +281,11 @@ ui['auto-ocr'].checked = localStorage.getItem('ctrl-auto-ocr') !== 'false';
 ui['auto-ocr'].addEventListener('change',() => localStorage.setItem('ctrl-auto-ocr',String(ui['auto-ocr'].checked)));
 ui['fast-answer'].checked = localStorage.getItem('ctrl-auto-answer-v3') === 'true';
 ui['fast-answer'].addEventListener('change',() => localStorage.setItem('ctrl-auto-answer-v3',String(ui['fast-answer'].checked)));
+ui['answer-model'].addEventListener('change', () => { if (selected()) selected().answerChoice = ui['answer-model'].value; });
+ui['answer-thinking'].addEventListener('change', () => { if (selected()) selected().answerThinking = ui['answer-thinking'].checked; });
 ui['ask-answer'].addEventListener('click',async () => { const task = selected(); if (!task?.session || !originalOf(task)) return;
   task.answerPending = true; controls(); task.error = '';
-  try { const started = await api('ctrl/answer',{session:task.session}); task.job = started.id;
+  try { const started = await api('ctrl/answer',{session:task.session,model:ui['answer-model'].value,thinking:ui['answer-thinking'].checked}); task.job = started.id;
     task.state = 'running'; await loadTask(task); }
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.answerPending = false; controls(); }
@@ -353,23 +355,24 @@ ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; 
       ui['pip-return'].hidden=true; ui.float.textContent='置顶小窗 ↗'; }); }
   catch { pip=null; error('置顶小窗无法打开，请并排使用浏览器窗口。'); }
 });
-async function refreshConnections() { const statuses = await Promise.all(Object.keys(names).map(async name => {
+async function refreshConnections() { const statuses = await Promise.all(Object.keys(names).filter(name =>
+  ['qwen','intern'].includes(name) === (ui['call-mode'].value === 'api')).map(async name => {
   try { return {name,...await api('status?model='+name)}; } catch(e) { return {name,status:'error',detail:e.message}; }
-})); connectionState = Object.fromEntries(statuses.map(value => [value.name,value.status]));
-  ui.connection.textContent = statuses.map(value => `${names[value.name]}${value.status === 'ready' ? ' 已连接' : value.status === 'not_configured' ? ' 未配置' : value.status === 'login_required' ? ' 需登录' : ' 未连接'}`).join(' · ');
+})); Object.assign(connectionState, Object.fromEntries(statuses.map(value => [value.name,value.status])));
+  ui.connection.textContent = statuses.map(value => `${names[value.name]}${value.status === 'ready' ? (['qwen','intern'].includes(value.name) ? ' 已配置' : ' 已连接') : value.status === 'not_configured' ? ' 未配置' : value.status === 'login_required' ? ' 需登录' : ' 未连接'}`).join(' · ');
   ui['connection-detail'].textContent = statuses.map(value => value.detail || '').filter(Boolean).join('；');
   return connectionState; }
 function drawDispatch(snapshot) {
   if (!snapshot) return;
   ui['dispatch-state'].textContent = Object.entries(snapshot.models || {}).filter(([name]) => chosen('route').includes(name))
-    .map(([name,value]) => `${names[name]} ${value.busy ? '处理中' : value.ready ? '空闲' : '需连接'}`).join(' · ')+
-    (snapshot.waiting ? ` · 等待 ${snapshot.waiting} 项` : '');
+    .map(([name,value]) => `${names[name]} ${value.ready ? (value.active ? value.active+' 请求运行' : '空闲') : '需配置/连接'}`).join(' · ')+
+    ` · API ${snapshot.api_active || 0}/${snapshot.api_limit || 6}`+(snapshot.waiting ? ` · 排队 ${snapshot.waiting} 项` : '');
 }
 function setQwenConfig(config) {
   ui['qwen-base'].value = config.base_url || defaultQwenBase;
   ui['qwen-remember'].checked = !!config.remembered;
   ui['route-qwen'].disabled = !config.configured;
-  if (!config.configured) ui['route-qwen'].checked = false;
+  ui['route-qwen'].checked = !!config.configured;
   ui['qwen-status'].textContent = config.detail || (config.configured ?
     '已配置 qwen3.8-flash；可加入自动派单。实际可用性以调用结果为准。' : '未配置，填写后才能启用千问。');
 }
@@ -408,8 +411,61 @@ async function init() { if (!local) { ui.offline.hidden=false; ui.connection.tex
     selectedId=tasks.find(task => task.session === saved)?.id || tasks.at(-1)?.id || '';
     if (selected()) await loadTask(selected()); drawSelected(); watch();
     await loadQwenConfig();
-    refreshConnections().then(state => { for (const name of chosen('route')) if (name !== 'qwen' && state[name] !== 'ready') connectModel(name); }).catch(()=>{});
+    try { setInternConfig(await api('ctrl/intern-config')); } catch(e) { ui['intern-status'].textContent=e.message; }
+    refreshConnections().then(state => { for (const name of chosen('route')) if (['deepseek','gemini'].includes(name) && state[name] !== 'ready') connectModel(name); }).catch(()=>{});
   } catch(e) { ui.connection.textContent='本机服务未连接'; ui['connection-detail'].textContent=e.message;
     ui.offline.hidden=false; }
   controls(); }
 init();
+
+function updateMode() {
+  localStorage.setItem('ctrl-call-mode', ui['call-mode'].value);
+  for (const name of Object.keys(names)) {
+    const isApi = ['qwen','intern'].includes(name);
+    ui['route-'+name].closest('label').hidden = isApi !== (ui['call-mode'].value === 'api');
+  }
+  document.querySelector('.model-tools').hidden = ui['call-mode'].value === 'api';
+  if (ui['call-mode'].value === 'web' && !chosen('route').length) ui['route-deepseek'].checked = true;
+}
+ui['call-mode'].value = localStorage.getItem('ctrl-call-mode') || 'api';
+ui['call-mode'].addEventListener('change', () => {
+  ui['ocr-model'].value = ''; ui['analysis-model'].value = ''; updateMode();
+  if (local) refreshConnections().then(state => {
+    for (const name of chosen('route')) if (['deepseek','gemini'].includes(name) && state[name] !== 'ready') connectModel(name);
+  }).catch(e => error(e.message));
+});
+updateMode();
+for (const stage of ['ocr','analysis','answer']) ui[stage+'-model'].addEventListener('change', () => {
+  const name = ui[stage+'-model'].value;
+  if (['deepseek','gemini'].includes(name) && connectionState[name] !== 'ready') connectModel(name);
+});
+function setInternConfig(config) {
+  ui['intern-base'].value = config.base_url;
+  ui['intern-model'].replaceChildren(...(config.models || []).map(name => {
+    const option = document.createElement('option'); option.value = option.textContent = name; return option;
+  }));
+  ui['intern-model'].value = config.model;
+  for (const stage of ['ocr','analysis','answer']) {
+    const select = ui[stage+'-model'];
+    for (const old of [...select.options]) if (old.value.startsWith('intern:')) old.remove();
+    for (const model of config.models || []) {
+      if (stage === 'ocr' && !(config.vision_models || []).includes(model)) continue;
+      const option = document.createElement('option'); option.value = 'intern:'+model;
+      option.textContent = '书生 · '+model; select.append(option);
+    }
+  }
+  ui['intern-remember'].checked = !!config.remembered;
+  ui['route-intern'].disabled = !config.configured;
+  ui['intern-status'].textContent = config.configured ? '已配置；思考使用平台默认。实际可用性以调用结果为准。' : '未配置，请填写 Key。';
+}
+ui['intern-save'].addEventListener('click', async () => {
+  ui['intern-save'].disabled = true;
+  try {
+    setInternConfig(await api('ctrl/intern-config', {base_url:ui['intern-base'].value,
+      model:ui['intern-model'].value,api_key:ui['intern-key'].value.trim(),remember:ui['intern-remember'].checked}));
+    ui['intern-key'].value = ''; ui['route-intern'].checked = true;
+    await refreshConnections();
+  } catch(e) { ui['intern-status'].textContent = e.message; }
+  finally { ui['intern-save'].disabled = false; }
+});
+

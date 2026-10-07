@@ -4,9 +4,12 @@ import threading
 
 
 class Dispatcher:
-    def __init__(self, names):
+    def __init__(self, names, api_names=(), api_limit=6):
         self.condition = threading.Condition(threading.RLock())
-        self.pools = {name: ThreadPoolExecutor(max_workers=1) for name in names}
+        self.api_names = set(api_names)
+        self.api_limit = api_limit
+        self.active = {name: 0 for name in names}
+        self.pools = {name: ThreadPoolExecutor(max_workers=api_limit if name in self.api_names else 1) for name in names}
         self.busy = set()
         self.ready = {name: True for name in names}
         self.pending = []
@@ -29,12 +32,15 @@ class Dispatcher:
     def _dispatch(self):
         for item in sorted(self.pending, key=lambda item: item[:2]):
             candidates, assign, work = item[2:]
-            name = next((name for name in candidates
-                         if self.ready.get(name) and name not in self.busy), None)
+            api_active = sum(self.active[name] for name in self.api_names)
+            name = next((name for name in candidates if self.ready.get(name) and
+                         ((name in self.api_names and api_active < self.api_limit) or
+                          (name not in self.api_names and not self.active.get(name)))), None)
             if name is None:
                 continue
             self.pending.remove(item)
             self.busy.add(name)
+            self.active[name] += 1
             assign(name)
             self.pools[name].submit(self._run, name, work)
         self.condition.notify_all()
@@ -44,13 +50,18 @@ class Dispatcher:
             work(name)
         finally:
             with self.condition:
-                self.busy.remove(name)
+                self.active[name] -= 1
+                if not self.active[name]:
+                    self.busy.discard(name)
                 self._dispatch()
 
     def snapshot(self):
         with self.condition:
-            return {'models': {name: {'busy': name in self.busy, 'ready': self.ready.get(name, False)}
-                               for name in self.pools}, 'waiting': len(self.pending)}
+            return {'models': {name: {'busy': name in self.busy, 'active': self.active[name],
+                                     'capacity': self.api_limit if name in self.api_names else 1,
+                                     'ready': self.ready.get(name, False)} for name in self.pools},
+                    'api_active': sum(self.active[name] for name in self.api_names),
+                    'api_limit': self.api_limit, 'waiting': len(self.pending)}
 
     def wait_idle(self):
         with self.condition:

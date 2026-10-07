@@ -1,0 +1,91 @@
+"""Browser smoke checks with mocked AI endpoints; never sends a real question."""
+import json
+import mimetypes
+from pathlib import Path
+import unittest
+from urllib.parse import urlsplit
+
+from playwright.sync_api import sync_playwright, expect
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class CtrlBrowserTests(unittest.TestCase):
+    def test_api_modes_and_independent_answer_in_compact_window(self):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(channel='msedge', headless=True)
+            page = browser.new_page(viewport={'width':480,'height':850})
+            errors, tasks, sessions, answers = [], [], {}, []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            def static(route):
+                file = ROOT/'dist'/urlsplit(route.request.url).path.lstrip('/')
+                if not file.is_file() or not file.resolve().is_relative_to((ROOT/'dist').resolve()):
+                    route.fulfill(status=404)
+                    return
+                mime = 'text/javascript' if file.suffix == '.mjs' else mimetypes.guess_type(file)[0]
+                route.fulfill(status=200,body=file.read_bytes(),content_type=mime or 'application/octet-stream',
+                              headers={'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'"})
+            page.route('http://127.0.0.1:8771/**', static)
+            def mock(route):
+                path = route.request.url.split('/api/')[1]
+                body = route.request.post_data_json if route.request.method == 'POST' else {}
+                if path == 'session': value = {'session':'mock-session'}
+                elif path == 'ctrl/qwen-config': value = {'configured':True,'remembered':True,'base_url':'https://maas.qianwenaiapi.com/compatible-mode/v1','model':'qwen3.8-flash'}
+                elif path == 'ctrl/intern-config': value = {'configured':True,'remembered':False,'base_url':'https://discovery-api.intern-ai.org.cn/v1','model':'deepseek-v4-flash-vision','models':['deepseek-v4-flash-vision','deepseek-v4-flash-0731'],'vision_models':['deepseek-v4-flash-vision']}
+                elif path.startswith('status'): value = {'status':'ready'}
+                elif path == 'ctrl/tasks': value = {'tasks':tasks,'dispatch':{'models':{'qwen':{'active':0,'ready':True}},'api_active':0,'api_limit':6,'waiting':0}}
+                elif path == 'ctrl/start':
+                    key = 's'+str(len(tasks)); job = 'j'+key
+                    tasks.append({'session':key,'client_id':body['client_id'],'job':job,'title':body['text'],'state':'completed','assigned':'qwen','ready':True,'has_original':True})
+                    sessions[key] = {'original':body['text'],'state':'completed','assigned':'qwen','job':job,'kind':'ctrl-start','models':{'qwen':{'original':body['text'],'route':{'keywords':['检索词'],'sites':[]},'answer':''},'intern':{'original':'','route':None,'answer':''}},'activity':{'qwen':{'state':'completed','stage':'原题和建议已返回'}}}
+                    value = {'id':job,'session':key}
+                elif path.startswith('ctrl/session'): value = sessions[path.split('id=')[1]]
+                elif path == 'ctrl/answer':
+                    answers.append(body)
+                    value = {'id':'answer-job','session':body['session']}
+                    session = sessions[body['session']]
+                    session['job'] = 'answer-job'; session['kind'] = 'ctrl-answer'
+                    session['models']['intern']['answer'] = '答案 B，待核验'
+                    session['activity']['intern'] = {'state':'completed','answer':'答案 B，待核验'}
+                else: value = {}
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(value))
+            page.route('**/api/**', mock)
+            page.goto('http://127.0.0.1:8771/ctrl-assistant.html')
+            expect(page.locator('#route-qwen')).to_be_enabled()
+            self.assertEqual(page.locator('#call-mode').input_value(), 'api')
+            page.locator('#question').fill('哪一项不正确？A甲 B乙')
+            page.locator('#start').click()
+            page.locator('#original-section').wait_for(state='visible')
+            page.locator('#answer-model').select_option('intern:deepseek-v4-flash-0731')
+            page.locator('#ask-answer').click()
+            expect(page.locator('#answer')).to_contain_text('答案 B')
+            self.assertEqual(answers[0]['model'], 'intern:deepseek-v4-flash-0731')
+            page.locator('#call-mode').select_option('web')
+            self.assertTrue(page.locator('#route-deepseek').is_visible())
+            self.assertFalse(page.locator('#route-qwen').is_visible())
+            page.locator('#call-mode').select_option('api')
+            for width in (480,360):
+                page.set_viewport_size({'width':width,'height':850})
+                self.assertTrue(page.evaluate('() => document.documentElement.scrollWidth <= innerWidth'), f'overflow at {width}')
+            out = ROOT/'output/playwright'
+            out.mkdir(parents=True,exist_ok=True)
+            page.screenshot(path=str(out/'ctrl-api-360.png'),full_page=True)
+            with page.context.expect_page() as new_window:
+                page.locator('#float').click()
+            small = new_window.value
+            small.locator('#pip-question').wait_for(state='visible')
+            for width in (480,360):
+                small.set_viewport_size({'width':width,'height':700})
+                self.assertTrue(small.evaluate('() => document.documentElement.scrollWidth <= innerWidth'), f'PiP overflow at {width}')
+            small.locator('#pip-question').fill('小窗第二题')
+            small.locator('#pip-start').click()
+            expect(small.locator('#task-tabs button')).to_have_count(2)
+            self.assertTrue(small.locator('#answer-model').is_visible())
+            small.screenshot(path=str(out/'ctrl-api-pip-360.png'),full_page=True)
+            small.close()
+            self.assertEqual(errors, [])
+            browser.close()
+
+
+if __name__ == '__main__':
+    unittest.main()
