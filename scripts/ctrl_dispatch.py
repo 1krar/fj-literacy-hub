@@ -33,9 +33,10 @@ class Dispatcher:
         for item in sorted(self.pending, key=lambda item: item[:2]):
             candidates, assign, work = item[2:]
             api_active = sum(self.active[name] for name in self.api_names)
-            name = next((name for name in candidates if self.ready.get(name) and
+            available = [name for name in candidates if self.ready.get(name) and
                          ((name in self.api_names and api_active < self.api_limit) or
-                          (name not in self.api_names and not self.active.get(name)))), None)
+                          (name not in self.api_names and not self.active.get(name)))]
+            name = min(available, key=lambda name: self.active[name]) if available else None
             if name is None:
                 continue
             self.pending.remove(item)

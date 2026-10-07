@@ -86,6 +86,21 @@ class ApiWorkflowTests(unittest.TestCase):
         self.ctrl.wait_idle()
         self.assertEqual(self.ctrl.get_session(task['session'])['state'], 'completed')
 
+    def test_two_api_providers_share_six_slots_and_use_idle_provider_first(self):
+        def request(*args):
+            self.release.wait(3)
+            return {'status':'completed','text':'{"keywords":["甲"],"sites":[]}'}
+        self.qwen._request = self.intern._request = request
+        tasks = [self.ctrl.start({'text':f'题{i}', 'models':['qwen','intern']}) for i in range(7)]
+        state = self.ctrl.dispatcher.snapshot()
+        self.assertEqual(state['api_active'], 6)
+        self.assertEqual(state['models']['qwen']['active'], 3)
+        self.assertEqual(state['models']['intern']['active'], 3)
+        self.assertEqual(state['waiting'], 1)
+        self.assertEqual([self.ctrl.get_session(task['session'])['assigned'] for task in tasks[:2]], ['qwen','intern'])
+        self.release.set()
+        self.ctrl.wait_idle()
+
     def test_answer_can_use_another_provider_without_replacing_route_context(self):
         sent = []
         self.qwen._request = lambda *args: {'status':'completed','text':'{"keywords":["关键词"],"sites":[]}'}
