@@ -8,6 +8,8 @@ const ids = ['call-mode','ocr-model','analysis-model','answer-model','answer-thi
   'progress-fill','progress-label','elapsed','model-progress','route-tabs','answer-tabs','original-section',
   'original','view-image','copy-original','search-section','keywords','copy-keywords','sites','ask-answer',
   'answer','copy-answer','error','copy-error','pip-return','return-card','image-dialog','full-image','close-image'];
+ids.push('settings-open','settings-dialog','close-settings','strategy-summary','review-dialog','review-title','close-review','review-model','submit-review','adopt-original','ocr-difference','ocr-diff-text');
+for (const part of ['ocr','analysis','answer']) ids.push('version-'+part,'review-'+part,'note-'+part);
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
 const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash', intern:'书生 API'};
@@ -20,7 +22,7 @@ let imageQueue = Promise.resolve(), renderSignature = '';
 const connecting = new Set();
 const selected = () => tasks.find(task => task.id === selectedId);
 const chosen = prefix => Object.keys(names).filter(name => ui[prefix+'-'+name].checked && (ui['call-mode'].value === 'api' ? ['qwen','intern'].includes(name) : ['deepseek','gemini'].includes(name))); 
-const originalOf = task => task?.data?.[task.routeSelected]?.original ||
+const originalOf = task => task?.canonicalOriginal || task?.data?.[task.routeSelected]?.original ||
   Object.values(task?.data || {}).find(value => value.original)?.original || '';
 function stage(message) { ui.stage.textContent = message; ui['input-status'].textContent = message; }
 function error(message) { ui.error.textContent = message || ''; ui.error.hidden = !message; ui['copy-error'].hidden = !message; }
@@ -32,7 +34,7 @@ function controls() {
   ui['ask-answer'].disabled = !local || !task?.session || !task.assigned || !originalOf(task) || task.answerPending || answering;
   ui['ask-answer'].textContent = answering ? '答案已入队 / 正在回答' : '问答案';
   ui['refresh-card'].disabled = !local || !task?.session;
-  const retryable = task && ((!task.session && task.state === 'failed') ||
+  const retryable = task && (task.failedJob || (!task.session && task.state === 'failed') ||
     Object.values(task.jobData?.results || {}).some(value => value.state === 'failed'));
   ui['retry-card'].disabled = !local || !retryable || task.state === 'running' || task.retryPending;
   ui['rerun-card'].disabled = ui['retry-card'].disabled;
@@ -133,7 +135,7 @@ function drawSelected() {
   ui['assigned-model'].textContent = task?.assigned ? '识题：'+names[task.assigned] : '自动分配给空闲模型';
   ui['answer-model'].value = task?.answerChoice || '';
   ui['answer-thinking'].checked = !!task?.answerThinking;
-  const signature = JSON.stringify([task?.id,task?.data,task?.jobData?.results,task?.state,task?.error,task?.hadImage]);
+  const signature = JSON.stringify([task?.id,task?.data,task?.versions,task?.versionChoice,task?.revision,task?.jobData?.results,task?.state,task?.error,task?.hadImage]);
   if (signature === renderSignature) { controls(); return; }
   renderSignature = signature;
   if (!task) {
@@ -141,7 +143,9 @@ function drawSelected() {
     stage('连续粘贴题目，点击上方窄标签切换。'); error(''); controls(); return;
   }
   const data = task.data || {}, source = data[task.routeSelected] || {};
-  const original = source.original || originalOf(task) || (!task.session ? task.inputText : ''), route = source.route;
+  const version = drawVersions(task);
+  const original = version.ocr?.text || originalOf(task) || (!task.session ? task.inputText : ''), route = version.analysis?.route || source.route;
+  task.visibleOriginal = original; task.visibleRoute = route;
   ui.original.textContent = original || '截图待识别'; ui['original-section'].hidden = !original && !task.hadImage;
   ui['view-image'].hidden = !task.hadImage;
   ui['search-section'].hidden = !route;
@@ -162,10 +166,12 @@ function drawSelected() {
       button.addEventListener('click', () => copy(site.query)); card.append(query, button); }
     return card;
   }));
-  const answer = data[task.answerSelected]?.answer || '';
+  const answer = version.answer?.answer || data[task.answerSelected]?.answer || '';
+  task.visibleAnswer = answer;
   ui.answer.textContent = answer; ui.answer.hidden = !answer; ui['copy-answer'].hidden = !answer;
   drawModelTabs(ui['route-tabs'],task,'route',task.routeSelected,name => task.routeSelected = name);
   drawModelTabs(ui['answer-tabs'],task,'answer',task.answerSelected,name => task.answerSelected = name);
+  if (task.versions) { ui['route-tabs'].hidden = true; ui['answer-tabs'].hidden = true; }
   const job = task.jobData;
   if (job?.state === 'running') stage(Object.entries(job.results || {}).map(([name,item]) => `${names[name] || '自动派单'}：${item.stage || '处理中'}`).join('；'));
   else if (task.state === 'failed') stage('当前题未完成；可以点击重试。');
@@ -179,6 +185,8 @@ async function loadTask(task) {
   try {
     const session = await api('ctrl/session?id='+encodeURIComponent(task.session));
     task.data = session.models; task.title = (session.original || task.title || '截图识别中').replace(/\s+/g,' ').slice(0,45);
+    task.canonicalOriginal = session.original; task.versions = session.versions; task.revision = session.original_revision || 'base';
+    task.failedJob = session.failed_job;
     task.state = session.state; task.job = session.job; task.error = '';
     task.assigned = session.assigned;
     task.jobData = {id:session.job,kind:session.kind,state:session.state,results:session.activity,started_at:session.started_at};
@@ -285,7 +293,7 @@ ui['answer-model'].addEventListener('change', () => { if (selected()) selected()
 ui['answer-thinking'].addEventListener('change', () => { if (selected()) selected().answerThinking = ui['answer-thinking'].checked; });
 ui['ask-answer'].addEventListener('click',async () => { const task = selected(); if (!task?.session || !originalOf(task)) return;
   task.answerPending = true; controls(); task.error = '';
-  try { const started = await api('ctrl/answer',{session:task.session,model:ui['answer-model'].value,thinking:ui['answer-thinking'].checked}); task.job = started.id;
+  try { const started = await api('ctrl/answer',{session:task.session,model:ui['answer-model'].value,thinking:ui['answer-thinking'].checked}); task.job = started.id; task.awaitAnswerJob = started.id;
     task.state = 'running'; await loadTask(task); }
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.answerPending = false; controls(); }
@@ -302,7 +310,7 @@ ui['archive-task'].addEventListener('click',async () => {
 });
 async function retrySelected(mode='read_first') { const task = selected(); if (!task || task.retryPending) return;
   task.retryPending = true; controls(); task.error = '';
-  try { const result = task.session ? await api('ctrl/retry',{job:task.job,mode}) :
+  try { const result = task.session ? await api('ctrl/retry',{job:task.failedJob || task.job,mode}) :
       await api('ctrl/start',{text:task.inputText,image:task.image,models:task.models,
         fast_answer:task.fastAnswer,client_id:task.id});
     task.session = result.session; task.job = result.id;
@@ -310,11 +318,11 @@ async function retrySelected(mode='read_first') { const task = selected(); if (!
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.retryPending = false; controls(); }
 }
-ui['retry-card'].addEventListener('click',() => retrySelected());
+ui['retry-card'].addEventListener('click',event => retrySelected(event.shiftKey ? 'restart' : 'read_first'));
 ui['rerun-card'].addEventListener('click',() => { ui['rerun-card'].closest('details').open=false; retrySelected('restart'); });
-ui['copy-original'].addEventListener('click',() => copy(originalOf(selected())));
-ui['copy-keywords'].addEventListener('click',() => copy((selected()?.data?.[selected()?.routeSelected]?.route?.keywords || []).join(' ')));
-ui['copy-answer'].addEventListener('click',() => copy(selected()?.data?.[selected()?.answerSelected]?.answer || ''));
+ui['copy-original'].addEventListener('click',() => copy(selected()?.visibleOriginal || originalOf(selected())));
+ui['copy-keywords'].addEventListener('click',() => copy((selected()?.visibleRoute?.keywords || []).join(' ')));
+ui['copy-answer'].addEventListener('click',() => copy(selected()?.visibleAnswer || ''));
 ui['copy-error'].addEventListener('click',() => {
   const task = selected();
   copy(formatErrorReport('route',{time:new Date().toISOString(),models:task?.models || Object.keys(task?.jobData?.results || {}),
@@ -349,6 +357,7 @@ ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; 
     }
     pip.document.title='CTRL 检索卡片'; pip.document.body.className='pip-body';
     bindImageCapture(pip.document, enqueueImage, e => error(e.message));
+    bindRedoShortcut(pip.document);
     pip.document.body.append(ui['ctrl-board']); ui['pip-return'].hidden=false;
     ui.float.textContent='收回小窗';
     pip.addEventListener('pagehide',() => { boardHome.prepend(ui['ctrl-board']); pip=null;
@@ -364,6 +373,7 @@ async function refreshConnections() { const statuses = await Promise.all(Object.
   return connectionState; }
 function drawDispatch(snapshot) {
   if (!snapshot) return;
+  ui['strategy-summary'].textContent = `${ui['call-mode'].value === 'api' ? 'API' : '网页'} · ${chosen('route').map(name => names[name]).join(' / ') || '选择模型'} · ${snapshot.api_active || 0}/${snapshot.api_limit || 6}`+(snapshot.waiting ? ` · 排队${snapshot.waiting}` : '');
   ui['dispatch-state'].textContent = Object.entries(snapshot.models || {}).filter(([name]) => chosen('route').includes(name))
     .map(([name,value]) => `${names[name]} ${value.ready ? (value.active ? value.active+' 请求运行' : '空闲') : '需配置/连接'}`).join(' · ')+
     ` · API ${snapshot.api_active || 0}/${snapshot.api_limit || 6}`+(snapshot.waiting ? ` · 排队 ${snapshot.waiting} 项` : '');
@@ -467,5 +477,97 @@ ui['intern-save'].addEventListener('click', async () => {
     await refreshConnections();
   } catch(e) { ui['intern-status'].textContent = e.message; }
   finally { ui['intern-save'].disabled = false; }
+});
+
+function bindRedoShortcut(doc) {
+  doc.addEventListener('keydown', event => {
+    if (!event.isComposing && !event.repeat && event.altKey && event.shiftKey && event.key === 'Enter') {
+      event.preventDefault(); if (!ui['rerun-card'].disabled) ui['rerun-card'].click();
+    }
+  });
+}
+bindRedoShortcut(document);
+ui['settings-open'].addEventListener('click', () => ui['settings-dialog'].showModal());
+ui['close-settings'].addEventListener('click', () => ui['settings-dialog'].close());
+let reviewStage = '', reviewTask = null;
+function drawVersions(task) {
+  task.versionChoice ||= {};
+  const chosenVersions = {};
+  for (const stage of ['ocr','analysis','answer']) {
+    const versions = task.versions?.[stage] || [], select = ui['version-'+stage];
+    if (stage === 'answer' && task.awaitAnswerJob) {
+      const requested = versions.find(value => value.id.startsWith(task.awaitAnswerJob+':'));
+      if (requested) { task.versionChoice.answer = requested.id; task.awaitAnswerJob = null; }
+    }
+    if (!versions.some(value => value.id === task.versionChoice[stage])) task.versionChoice[stage] = versions[0]?.id || '';
+    const signature = JSON.stringify(versions.map(value => [value.id,value.actual_model,value.choice,value.model]));
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(...versions.map((value,index) => {
+        const option = document.createElement('option'); option.value = value.id;
+        option.textContent = `${index+1} · ${value.actual_model || value.choice || names[value.model] || '原始文本'}`;
+        return option;
+      })); select.dataset.options = signature;
+    }
+    select.value = task.versionChoice[stage]; select.hidden = !versions.length;
+    const current = versions.find(value => value.id === select.value); chosenVersions[stage] = current;
+    const stale = stage !== 'ocr' && current && current.based_on !== task.revision;
+    const unseen = versions.length - ((task.seenVersions ||= {})[stage] || 1);
+    const note = ui['note-'+stage];
+    note.textContent = [stale ? '依据旧原题；可用当前原题重新复核。' : '',unseen > 0 ? `有 ${unseen} 个新版本，可切换查看。` : ''].filter(Boolean).join(' ');
+    note.hidden = !note.textContent; note.classList.toggle('stale',!!stale);
+    ui['review-'+stage].disabled = !local || !task.session || (stage === 'ocr' ? !task.hadImage : !originalOf(task));
+  }
+  const original = chosenVersions.ocr;
+  ui['adopt-original'].hidden = !original || original.id === task.revision;
+  ui['ocr-difference'].hidden = !original || original.text === originalOf(task);
+  if (!ui['ocr-difference'].hidden) {
+    const oldText = originalOf(task), newText = original.text;
+    let before = 0, after = 0;
+    while (before < Math.min(oldText.length,newText.length) && oldText[before] === newText[before]) before++;
+    while (after < Math.min(oldText.length,newText.length)-before && oldText.at(-1-after) === newText.at(-1-after)) after++;
+    const changed = document.createElement('mark'); changed.textContent = newText.slice(before,after ? -after : undefined) || '（删除文字）';
+    ui['ocr-diff-text'].replaceChildren(document.createTextNode(newText.slice(0,before)),changed,document.createTextNode(after ? newText.slice(-after) : ''));
+  }
+  return chosenVersions;
+}
+for (const stage of ['ocr','analysis','answer']) {
+  ui['version-'+stage].addEventListener('change', () => {
+    const task = selected(); if (!task) return;
+    task.versionChoice[stage] = ui['version-'+stage].value;
+    task.seenVersions[stage] = task.versions?.[stage]?.length || 0;
+    renderSignature = ''; drawSelected();
+  });
+  ui['review-'+stage].addEventListener('click', () => {
+    const task = selected(); if (!task?.session) return;
+    reviewStage = stage; reviewTask = task;
+    ui['review-title'].textContent = {ocr:'识题复核',analysis:'检索建议复核',answer:'答案复核'}[stage];
+    const source = ui[stage === 'ocr' ? 'ocr-model' : 'answer-model'];
+    ui['review-model'].replaceChildren(...[...source.options].filter(option => option.value).map(option => option.cloneNode(true)));
+    for (const option of ui['review-model'].options) {
+      const name = option.value.split(':')[0];
+      option.disabled = ['qwen','intern'].includes(name) && ui['route-'+name].disabled;
+    }
+    const alternative = [...ui['review-model'].options].find(option => !option.disabled && option.value.split(':')[0] !== task.assigned);
+    ui['review-model'].value = alternative?.value || [...ui['review-model'].options].find(option => !option.disabled)?.value || '';
+    ui['review-dialog'].showModal();
+  });
+}
+ui['close-review'].addEventListener('click', () => ui['review-dialog'].close());
+ui['submit-review'].addEventListener('click', async () => {
+  const task = reviewTask; if (!task?.session || ui['submit-review'].disabled) return;
+  ui['submit-review'].disabled = true;
+  try {
+    const model = ui['review-model'].value;
+    const name = model.split(':')[0];
+    if (['deepseek','gemini'].includes(name) && connectionState[name] !== 'ready') await connectModel(name);
+    const result = await api('ctrl/review',{session:task.session,stage:reviewStage,model,thinking:ui['answer-thinking'].checked && reviewStage === 'answer'});
+    task.job = result.id; task.state = 'running'; ui['review-dialog'].close(); await loadTask(task);
+  } catch(e) { task.error = e.message; ui['review-dialog'].close(); drawSelected(); }
+  finally { ui['submit-review'].disabled = false; }
+});
+ui['adopt-original'].addEventListener('click', async () => {
+  const task = selected(); if (!task?.session) return;
+  try { await api('ctrl/adopt',{session:task.session,version:task.versionChoice.ocr}); await loadTask(task); }
+  catch(e) { task.error=e.message; drawSelected(); }
 });
 

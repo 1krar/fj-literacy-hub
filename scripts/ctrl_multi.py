@@ -41,6 +41,8 @@ class CtrlProgress:
         transport = self.owner.providers[self.name]._transport
         owned = transport._owned_targets.get(transport._last_request_receipt)
         if owned:
+            # Preserve ownership even if navigation interrupts generate before its return.
+            self.model['receipt'] = transport._last_request_receipt
             owned['guarded'] = True
             owned['url'] = page.url
 
@@ -105,6 +107,8 @@ class MultiCtrlJobs:
         self.model_pools = self.dispatcher.pools
         self.intake_lock = threading.RLock()
         self.client_requests = {}
+        from ctrl_review import Reviews
+        self.reviews = Reviews(self)
 
     def shutdown(self, wait=True):
         self.dispatcher.shutdown(wait=wait)
@@ -131,6 +135,11 @@ class MultiCtrlJobs:
                 'image_suffix': entry.get('image_suffix'), 'created_at': saved.get('created_at') or time.time(),
                 'assigned': saved.get('assigned'), 'client_id': None, 'fast_answer': False,
                 'workflow': {}, 'workflow_ids': {}, 'api_configs': {}, 'candidates': list(self.providers)}
+            if saved.get('versions'):
+                self.sessions[session_id].update(versions=saved['versions'],
+                    original_revision=saved.get('original_revision','base'),
+                    version_seeded=[stage+name for stage,field in [('analysis','route'),('answer','answer')]
+                                    for name,value in models.items() if value.get(field)])
             job_id = saved.get('job') or uuid.uuid4().hex
             self.jobs.items[job_id] = {'id': job_id, 'kind': saved.get('kind') or 'ctrl-start',
                 'session': session_id, 'state': saved['state'], 'models': list(saved.get('activity', {})),
@@ -145,6 +154,7 @@ class MultiCtrlJobs:
                     del self.jobs.items[removable]
             job_id = uuid.uuid4().hex
             self.jobs.items[job_id] = {'id': job_id, 'kind': kind, 'session': session_id,
+                                       'based_on':self.sessions.get(session_id,{}).get('original_revision','base'),
                                        'state': 'running', 'models': models,
                                      'results': {name: {'state': 'queued', 'stage': '排队等待模型'} for name in models} if models else
                                                 {'waiting': {'state': 'queued', 'stage': '等待空闲模型自动领题'}},
@@ -154,6 +164,7 @@ class MultiCtrlJobs:
     def _mark(self, job_id, name, **fields):
         with self.jobs.lock:
             self.jobs.items[job_id]['results'][name].update(fields)
+            self.reviews.record(job_id,name,fields)
 
     def _finish(self, job_id):
         with self.jobs.lock:
@@ -206,6 +217,7 @@ class MultiCtrlJobs:
                 for receipt in {model.get('receipt'), model.get('answer_receipt')} - {None}:
                     self.model_pools[name].submit(self.providers[name].close_saved_response, receipt)
             del self.sessions[session_id]
+            self.reviews.release(session_id)
             if session.get('client_id'):
                 self.client_requests.pop(session['client_id'], None)
 
@@ -695,7 +707,7 @@ class MultiCtrlJobs:
                         path.unlink(missing_ok=True)
                 model['answer_receipt'] = result.get('cleanup_receipt')
                 model['original'] = session['original']
-            elif model.get('receipt'):
+            elif model.get('receipt') and model.get('original') == session['original']:
                 result = self._continue(name, model, ANSWER_PROMPT, job_id)
             else:
                 original = session['original']
@@ -740,6 +752,8 @@ class MultiCtrlJobs:
             previous = self.jobs.get(previous_id)
         except KeyError as exc:
             raise ValueError('原任务已过期，请重新提交题目') from exc
+        if previous.get('kind','').startswith('ctrl-review-'):
+            return self.reviews.retry(previous_id, mode == 'restart')
         if previous.get('kind') not in ('ctrl-start', 'ctrl-answer', 'ctrl-retry-start', 'ctrl-retry-answer'):
             raise ValueError('原任务不是 CTRL 助手任务')
         if previous['state'] == 'running':
@@ -765,6 +779,9 @@ class MultiCtrlJobs:
                 _, raw, suffix = self.read_input({'question': current['input_text'] or '截图',
                                                    'prompt': OCR_PROMPT, 'image': image})
         job_id = self._reserve('ctrl-retry-'+kind, session_id, failed)
+        self.jobs.items[previous_id]['retry_id'] = job_id
+        if mode == 'read_first':
+            self.jobs.items[job_id]['based_on'] = previous.get('based_on','base')
         for name in failed:
             self._submit_model(job_id, name, self._retry_queued, session_id, kind, raw, suffix, mode, priority=0)
         return {'id': job_id, 'session': session_id, 'retried': failed}
@@ -946,7 +963,11 @@ class MultiCtrlJobs:
                 activity.update({name: dict(value) for name, value in item['results'].items()})
             state = 'running' if any(item['state'] == 'running' for item in jobs) else (
                 jobs[-1]['state'] if jobs else 'completed')
+            versions = json.loads(json.dumps(self.reviews.seed(session)))
         return {'original': session['original'], 'state': state, 'activity': activity,
+                'failed_job':next((j['id'] for j in reversed(jobs) if not j.get('retry_id') and
+                                  any(v.get('state') == 'failed' for v in j['results'].values())),None),
+                'versions':versions, 'original_revision':session.get('original_revision','base'),
                 'assigned': session.get('assigned'),
                 'kind': jobs[-1].get('kind') if jobs else None,
                 'job': jobs[-1]['id'] if jobs else None,
@@ -993,6 +1014,7 @@ class MultiCtrlJobs:
                 for receipt in {model.get('receipt'), model.get('answer_receipt')} - {None}:
                     self.model_pools[name].submit(self.providers[name].close_saved_response, receipt)
             del self.sessions[session_id]
+            self.reviews.release(session_id)
             if session.get('client_id'):
                 self.client_requests.pop(session['client_id'], None)
         return {'archived': True}

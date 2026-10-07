@@ -15,7 +15,7 @@ class CtrlBrowserTests(unittest.TestCase):
         with sync_playwright() as p:
             browser = p.chromium.launch(channel='msedge', headless=True)
             page = browser.new_page(viewport={'width':480,'height':850})
-            errors, tasks, sessions, answers = [], [], {}, []
+            errors, tasks, sessions, answers, reviews, retries = [], [], {}, [], [], []
             page.on('pageerror', lambda error: errors.append(str(error)))
             def static(route):
                 file = ROOT/'dist'/urlsplit(route.request.url).path.lstrip('/')
@@ -40,6 +40,18 @@ class CtrlBrowserTests(unittest.TestCase):
                     sessions[key] = {'original':body['text'],'state':'completed','assigned':'qwen','job':job,'kind':'ctrl-start','models':{'qwen':{'original':body['text'],'route':{'keywords':['检索词'],'sites':[]},'answer':''},'intern':{'original':'','route':None,'answer':''}},'activity':{'qwen':{'state':'completed','stage':'原题和建议已返回'}}}
                     value = {'id':job,'session':key}
                 elif path.startswith('ctrl/session'): value = sessions[path.split('id=')[1]]
+                elif path == 'ctrl/review':
+                    reviews.append(body)
+                    session = sessions[body['session']]
+                    session['versions'] = {'ocr':[{'id':'base','text':session['original'],'model':'qwen'}],
+                        'analysis':[{'id':'base-route','route':session['models']['qwen']['route'],'model':'qwen','based_on':'base'},
+                                    {'id':'review-route','route':{'keywords':['复核检索词'],'sites':[]},'model':'intern','based_on':'base'}],
+                        'answer':[{'id':'base-answer','answer':'答案 B，待核验','model':'intern','based_on':'base'}]}
+                    session['job']='review-job'; session['kind']='ctrl-review-analysis'
+                    session['activity']['intern']={'state':'completed','stage':'复核完成'}
+                    value={'id':'review-job','session':body['session']}
+                elif path == 'ctrl/retry':
+                    retries.append(body); value={'id':'review-job','session':tasks[0]['session']}
                 elif path == 'ctrl/answer':
                     answers.append(body)
                     value = {'id':'answer-job','session':body['session']}
@@ -60,10 +72,31 @@ class CtrlBrowserTests(unittest.TestCase):
             page.locator('#ask-answer').click()
             expect(page.locator('#answer')).to_contain_text('答案 B')
             self.assertEqual(answers[0]['model'], 'intern:deepseek-v4-flash-0731')
+            page.locator('#review-analysis').click()
+            page.locator('#review-model').select_option('intern:deepseek-v4-flash-0731')
+            page.locator('#submit-review').click()
+            expect(page.locator('#version-analysis option')).to_have_count(2)
+            expect(page.locator('#keywords')).to_have_text('检索词')
+            page.locator('#version-analysis').select_option('review-route')
+            expect(page.locator('#keywords')).to_have_text('复核检索词')
+            self.assertEqual(reviews[0]['stage'],'analysis')
+            self.assertFalse(page.locator('#call-mode').is_visible())
+            page.locator('#settings-open').click()
             page.locator('#call-mode').select_option('web')
             self.assertTrue(page.locator('#route-deepseek').is_visible())
             self.assertFalse(page.locator('#route-qwen').is_visible())
             page.locator('#call-mode').select_option('api')
+            page.locator('#close-settings').click()
+            # A failed review makes both direct shortcuts available without opening the menu.
+            sessions[tasks[0]['session']]['activity']['intern']={'state':'failed','error':'读取失败'}
+            sessions[tasks[0]['session']]['state']='failed'
+            page.locator('#refresh-card').click()
+            expect(page.locator('#retry-card')).to_be_enabled()
+            page.locator('#retry-card').click(modifiers=['Shift'])
+            expect(page.locator('#retry-card')).to_be_enabled()
+            page.keyboard.press('Alt+Shift+Enter')
+            expect(page.locator('#retry-card')).to_be_enabled()
+            self.assertEqual([x['mode'] for x in retries], ['restart','restart'])
             for width in (480,360):
                 page.set_viewport_size({'width':width,'height':850})
                 self.assertTrue(page.evaluate('() => document.documentElement.scrollWidth <= innerWidth'), f'overflow at {width}')

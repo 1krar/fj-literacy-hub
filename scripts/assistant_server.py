@@ -310,6 +310,10 @@ def handler_for(jobs, session, ctrl_jobs=None):
                     self.reply(202, ctrl_jobs.answer(data))
                 elif self.path == '/api/ctrl/retry' and ctrl_jobs:
                     self.reply(202, ctrl_jobs.retry(data))
+                elif self.path == '/api/ctrl/review' and ctrl_jobs:
+                    self.reply(202, ctrl_jobs.reviews.submit(data))
+                elif self.path == '/api/ctrl/adopt' and ctrl_jobs:
+                    self.reply(200, ctrl_jobs.reviews.adopt(data))
                 elif self.path == '/api/ctrl/archive' and ctrl_jobs:
                     self.reply(200, ctrl_jobs.archive(data))
                 elif self.path in ('/api/ctrl/qwen-config', '/api/ctrl/intern-config') and ctrl_jobs:
