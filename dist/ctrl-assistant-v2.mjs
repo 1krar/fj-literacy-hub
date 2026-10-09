@@ -8,13 +8,15 @@ const ids = ['call-mode','ocr-model','analysis-model','answer-model','answer-thi
   'progress-fill','progress-label','elapsed','model-progress','route-tabs','answer-tabs','original-section',
   'original','view-image','copy-original','search-section','keywords','copy-keywords','sites','ask-answer',
   'answer','copy-answer','error','copy-error','pip-return','return-card','image-dialog','full-image','close-image'];
-ids.push('archive-left','toggle-marks','option-marks','answer-source','answer-section','refresh-feedback','settings-open','settings-dialog','close-settings','strategy-summary','review-dialog','review-title','close-review','review-model','submit-review','adopt-original','ocr-difference','ocr-diff-text');
-for (const part of ['ocr','analysis','answer']) ids.push('version-'+part,'review-'+part,'note-'+part);
+ids.push('archive-left','toggle-marks','option-marks','answer-source','answer-section','refresh-feedback','settings-open','settings-dialog','close-settings','strategy-summary','adopt-original','ocr-difference','ocr-diff-text');
+for (const part of ['ocr','analysis','answer']) ids.push('version-'+part,'review-'+part,'review-choice-'+part,'note-'+part);
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
 const names = {deepseek:'DeepSeek', gemini:'Gemini', qwen:'千问 Flash', intern:'书生 API'};
 const defaultQwenBase = 'https://maas.qianwenaiapi.com/compatible-mode/v1';
 const boardHome = ui['ctrl-board'].parentElement;
+const taskBar = ui['task-tabs'].parentElement, taskBarAnchor = document.createComment('task-bar-home');
+taskBar.before(taskBarAnchor);
 let csrf = '', pip = null, draftImage = null, selectedId = '', tasks = [], nextNumber = 1;
 let connectionState = {}, watchRunning = false;
 let tabSignature = '';
@@ -400,11 +402,12 @@ ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; 
     pip.document.title='CTRL 检索卡片'; pip.document.body.className='pip-body';
     bindImageCapture(pip.document, enqueueImage, e => error(e.message));
     bindRedoShortcut(pip.document);
+    ui['ctrl-board'].prepend(taskBar);
     pip.document.body.append(ui['ctrl-board']); ui['pip-return'].hidden=false;
     ui.float.textContent='收回小窗';
-    pip.addEventListener('pagehide',() => { boardHome.prepend(ui['ctrl-board']); pip=null;
+    pip.addEventListener('pagehide',() => { taskBarAnchor.after(taskBar); boardHome.prepend(ui['ctrl-board']); pip=null;
       ui['pip-return'].hidden=true; ui.float.textContent='置顶小窗 ↗'; }); }
-  catch { pip=null; error('置顶小窗无法打开，请并排使用浏览器窗口。'); }
+  catch { taskBarAnchor.after(taskBar); pip=null; error('置顶小窗无法打开，请并排使用浏览器窗口。'); }
 });
 async function refreshConnections() { const statuses = await Promise.all(Object.keys(names).filter(name =>
   ['qwen','intern'].includes(name) === (ui['call-mode'].value === 'api')).map(async name => {
@@ -509,6 +512,7 @@ function setInternConfig(config) {
   }
   ui['intern-remember'].checked = !!config.remembered;
   ui['route-intern'].disabled = !config.configured;
+  renderSignature = ''; drawSelected();
   ui['intern-status'].textContent = config.configured ? '已配置；思考使用平台默认。实际可用性以调用结果为准。' : '未配置，请填写 Key。';
 }
 ui['intern-save'].addEventListener('click', async () => {
@@ -532,11 +536,11 @@ function bindRedoShortcut(doc) {
 bindRedoShortcut(document);
 ui['settings-open'].addEventListener('click', () => ui['settings-dialog'].showModal());
 ui['close-settings'].addEventListener('click', () => ui['settings-dialog'].close());
-let reviewStage = '', reviewTask = null;
 function drawVersions(task) {
   task.versionChoice ||= {};
   const chosenVersions = {};
   for (const stage of ['ocr','analysis','answer']) {
+    syncReviewChoice(task,stage);
     const versions = task.versions?.[stage] || [], select = ui['version-'+stage];
     const pending = task.awaitReview?.[stage];
     if (pending) {
@@ -566,7 +570,8 @@ function drawVersions(task) {
     const note = ui['note-'+stage];
     note.textContent = [stale ? '依据旧原题；可用当前原题重新复核。' : '',unseen > 0 ? `有 ${unseen} 个新版本，可切换查看。` : ''].filter(Boolean).join(' ');
     note.hidden = !note.textContent; note.classList.toggle('stale',!!stale);
-    ui['review-'+stage].disabled = !local || !task.session || (stage === 'ocr' ? !task.hadImage : !originalOf(task));
+    ui['review-'+stage].disabled = !!task.reviewPending?.[stage] || !local || !task.session || (stage === 'ocr' ? !task.hadImage : !originalOf(task));
+    ui['review-choice-'+stage].disabled = ui['review-'+stage].disabled;
   }
   const original = chosenVersions.ocr;
   ui['adopt-original'].hidden = !original || original.id === task.revision;
@@ -588,35 +593,50 @@ for (const stage of ['ocr','analysis','answer']) {
     task.seenVersions[stage] = task.versions?.[stage]?.length || 0;
     renderSignature = ''; drawSelected();
   });
+  ui['review-choice-'+stage].addEventListener('change', () => {
+    const task = selected(); if (!task) return;
+    (task.reviewChoice ||= {})[stage] = ui['review-choice-'+stage].value;
+    syncReviewChoice(task,stage);
+  });
   ui['review-'+stage].addEventListener('click', () => {
     const task = selected(); if (!task?.session) return;
-    reviewStage = stage; reviewTask = task;
-    ui['review-title'].textContent = {ocr:'识题复核',analysis:'检索建议复核',answer:'答案复核'}[stage];
-    const source = ui[stage === 'ocr' ? 'ocr-model' : 'answer-model'];
-    ui['review-model'].replaceChildren(...[...source.options].filter(option => option.value).map(option => option.cloneNode(true)));
-    for (const option of ui['review-model'].options) {
-      const name = option.value.split(':')[0];
-      option.disabled = ['qwen','intern'].includes(name) && ui['route-'+name].disabled;
-    }
-    const alternative = [...ui['review-model'].options].find(option => !option.disabled && option.value.split(':')[0] !== task.assigned);
-    const preferred = [...ui['review-model'].options].find(option => !option.disabled && option.value === 'intern');
-    ui['review-model'].value = preferred?.value || alternative?.value || [...ui['review-model'].options].find(option => !option.disabled)?.value || '';
-    ui['review-dialog'].showModal();
+    const choice = syncReviewChoice(task,stage);
+    if (!choice) { error('书生 API 尚未配置，请从旁边的下拉列表选择已连接的模型，或在设置中配置书生 API。'); return; }
+    runReview(task,stage,choice);
   });
 }
-ui['close-review'].addEventListener('click', () => ui['review-dialog'].close());
-ui['submit-review'].addEventListener('click', async () => {
-  const task = reviewTask; if (!task?.session || ui['submit-review'].disabled) return;
-  ui['submit-review'].disabled = true;
+function syncReviewChoice(task,stage) {
+  const source = ui[stage === 'ocr' ? 'ocr-model' : 'answer-model'], select = ui['review-choice-'+stage];
+  const options = [...source.options].filter(option => option.value);
+  const signature = JSON.stringify(options.map(option => [option.value,option.textContent, ['qwen','intern'].includes(option.value.split(':')[0]) && ui['route-'+option.value.split(':')[0]].disabled]));
+  if (select.dataset.catalog !== signature) {
+    select.replaceChildren(...options.map(option => {
+      const item = option.cloneNode(true), name = item.value.split(':')[0];
+      item.disabled = ['qwen','intern'].includes(name) && ui['route-'+name].disabled;
+      return item;
+    })); select.dataset.catalog = signature;
+  }
+  task.reviewChoice ||= {};
+  const preferred = [...select.options].find(option => option.value === 'intern:deepseek-v4-flash-vision' && !option.disabled);
+  const saved = [...select.options].find(option => option.value === task.reviewChoice[stage] && !option.disabled);
+  select.value = saved?.value || preferred?.value || '';
+  const label = select.selectedOptions[0]?.textContent || '未配置默认书生 API';
+  select.title = '选择复核模型 · 当前：'+label;
+  ui['review-'+stage].title = '直接复核 · '+label;
+  return select.value;
+}
+async function runReview(task,part,model) {
+  if (!task?.session || task.reviewPending?.[part]) return;
+  (task.reviewPending ||= {})[part] = true;
+  ui['review-'+part].disabled = true; ui['review-choice-'+part].disabled = true;
   try {
-    const model = ui['review-model'].value;
     const name = model.split(':')[0];
     if (['deepseek','gemini'].includes(name) && connectionState[name] !== 'ready') await connectModel(name);
-    const result = await api('ctrl/review',{session:task.session,stage:reviewStage,model,thinking:ui['answer-thinking'].checked && reviewStage === 'answer'});
-    renderSignature = ''; task.job = result.id; (task.awaitReview ||= {})[reviewStage] = result.id; task.state = 'running'; ui['review-dialog'].close(); await loadTask(task);
-  } catch(e) { task.error = e.message; ui['review-dialog'].close(); drawSelected(); }
-  finally { ui['submit-review'].disabled = false; }
-});
+    const result = await api('ctrl/review',{session:task.session,stage:part,model,thinking:ui['answer-thinking'].checked && part === 'answer'});
+    renderSignature = ''; task.job = result.id; (task.awaitReview ||= {})[part] = result.id; task.state = 'running'; await loadTask(task);
+  } catch(e) { task.error = e.message; if (selected() === task) drawSelected(); }
+  finally { delete task.reviewPending[part]; renderSignature = ''; if (selected() === task) drawSelected(); }
+}
 ui['adopt-original'].addEventListener('click', async () => {
   const task = selected(); if (!task?.session) return;
   try { await api('ctrl/adopt',{session:task.session,version:task.versionChoice.ocr}); await loadTask(task); }

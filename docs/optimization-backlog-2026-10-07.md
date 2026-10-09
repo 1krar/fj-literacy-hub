@@ -169,3 +169,6 @@
 验证：68 项 Python、33 项 JavaScript 检查通过；Edge 主页面与真实 PiP 验收通过。真实书生 DeepSeek Vision/0731 合成题调用均成功，真实默认复核自动显示和选项保留通过。平台在两个请求模型 ID 下均返回 dsv4-flash-vision，不能仅据该别名确认实际底层路由；保留请求 ID 和返回别名供排查。用户的无法返回问题暂未复现。
 
 流式协议参考：[DeepSeek 官方 Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)；思考输出不作为最终答案，截断结果不采用。书生网关控制参数仍以实际平台支持为准。
+
+
+2026-10-09：置顶小窗题目标签移至最上方并随滚动固定，收回后恢复主页面布局。复核默认明确调用书生 API 的 deepseek-v4-flash-vision；各环节旁的小箭头直接展开原生模型选择列表，选择后点击复核直接执行，不再打开配置弹窗。Edge 主页面与真实 PiP 浏览器验收通过，包括滚动到底部标签仍在顶部、默认模型和改选模型请求检查。
