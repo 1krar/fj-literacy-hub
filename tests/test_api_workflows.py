@@ -15,6 +15,34 @@ from intern_api import InternProvider
 
 
 class ApiWorkflowTests(unittest.TestCase):
+    def test_missing_original_automatically_redoes_once_then_recovers(self):
+        calls = []
+        def request(*args):
+            calls.append(1)
+            if len(calls) == 1: return {'status':'failed','detail':'fixture temporary failure'}
+            return {'status':'completed','text':json.dumps({'original':'恢复原题','keywords':['恢复'],'sites':[]})}
+        self.qwen._request = request
+        task = self.ctrl.start({'models':['qwen'],'image':'data:image/png;base64,'+base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()})
+        self.ctrl.wait_idle()
+        saved = self.ctrl.get_session(task['session'])
+        self.assertEqual(len(calls),2)
+        self.assertEqual(saved['original'],'恢复原题')
+        self.assertEqual(saved['auto_redo_count'],1)
+        self.assertEqual(saved['state'],'completed')
+
+    def test_automatic_redo_is_bounded_and_does_not_repeat_when_original_exists(self):
+        calls = []
+        self.qwen._request = lambda *args: (calls.append(1) or {'status':'failed','detail':'fixture failure'})
+        task = self.ctrl.start({'models':['qwen'],'image':'data:image/png;base64,'+base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()})
+        self.ctrl.wait_idle()
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.ctrl.get_session(task['session'])['state'],'failed')
+        calls.clear()
+        text = self.ctrl.start({'models':['qwen'],'text':'已有原题'})
+        self.ctrl.wait_idle()
+        self.assertEqual(len(calls),1)
+        self.assertEqual(self.ctrl.get_session(text['session'])['auto_redo_count'],0)
+
     def test_upgrade_handover_preserves_completed_results_without_credentials(self):
         self.ctrl.restore_completed([{'session':'upgrade-test', 'data': {
             'state':'completed','original':'原题','assigned':'qwen',

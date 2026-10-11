@@ -134,7 +134,8 @@ class MultiCtrlJobs:
                 'input_text': saved['original'], 'had_image': bool(raw), 'image': raw,
                 'image_suffix': entry.get('image_suffix'), 'created_at': saved.get('created_at') or time.time(),
                 'assigned': saved.get('assigned'), 'client_id': None, 'fast_answer': False,
-                'workflow': {}, 'workflow_ids': {}, 'api_configs': {}, 'candidates': list(self.providers)}
+                'workflow': {}, 'workflow_ids': {}, 'api_configs': {}, 'candidates': list(self.providers),
+                'auto_redo_count':saved.get('auto_redo_count',0)}
             if saved.get('versions'):
                 self.sessions[session_id].update(versions=saved['versions'],
                     original_revision=saved.get('original_revision','base'),
@@ -174,6 +175,23 @@ class MultiCtrlJobs:
             success = any(item['state'] == 'completed' for item in results.values())
             self.jobs.items[job_id]['state'] = 'completed' if success else 'failed'
             self.jobs.items[job_id]['stage'] = '本题处理完毕'
+        self._auto_redo_without_original(job_id)
+
+    def _auto_redo_without_original(self, job_id):
+        # Only one fresh attempt per question; works even when its UI is not selected.
+        with self.intake_lock:
+            job = self.jobs.items.get(job_id, {})
+            session = self.sessions.get(job.get('session'))
+            if (not session or job.get('state') != 'failed' or job.get('retry_id') or
+                job.get('kind') not in ('ctrl-start','ctrl-retry-start') or
+                session.get('original') or any(v.get('original') for v in session['models'].values()) or
+                session.get('auto_redo_count',0) >= 1):
+                return
+            session['auto_redo_count'] = 1
+            try:
+                self._retry({'job':job_id,'mode':'restart'})
+            except Exception as exc:
+                session['auto_redo_error'] = str(exc)[:200]
 
     def _submit_model(self, job_id, name, work, *args, priority=10):
         def run(assigned):
@@ -965,6 +983,7 @@ class MultiCtrlJobs:
                 jobs[-1]['state'] if jobs else 'completed')
             versions = json.loads(json.dumps(self.reviews.seed(session)))
         return {'original': session['original'], 'state': state, 'activity': activity,
+                'auto_redo_count':session.get('auto_redo_count',0),
                 'failed_job':next((j['id'] for j in reversed(jobs) if not j.get('retry_id') and
                                   any(v.get('state') == 'failed' for v in j['results'].values())),None),
                 'versions':versions, 'original_revision':session.get('original_revision','base'),
@@ -997,7 +1016,7 @@ class MultiCtrlJobs:
                           'ready': any(model.get('route') for model in session['models'].values()),
                           'has_original': bool(session['original']),
                           'has_failure': any(value['state'] == 'failed' for value in activity.values()),
-                          'had_image': session['had_image']})
+                          'had_image': session['had_image'],'auto_redo_count':session.get('auto_redo_count',0)})
         return tasks
 
     def archive(self, data):

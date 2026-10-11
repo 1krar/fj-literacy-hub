@@ -16,6 +16,7 @@ class CtrlBrowserTests(unittest.TestCase):
             browser = p.chromium.launch(channel='msedge', headless=True)
             page = browser.new_page(viewport={'width':480,'height':850})
             errors, tasks, sessions, answers, reviews, retries = [], [], {}, [], [], []
+            next_session = [0]
             page.on('pageerror', lambda error: errors.append(str(error)))
             def static(route):
                 file = ROOT/'dist'/urlsplit(route.request.url).path.lstrip('/')
@@ -35,7 +36,7 @@ class CtrlBrowserTests(unittest.TestCase):
                 elif path.startswith('status'): value = {'status':'ready'}
                 elif path == 'ctrl/tasks': value = {'tasks':tasks,'dispatch':{'models':{'qwen':{'active':0,'ready':True}},'api_active':0,'api_limit':6,'waiting':0}}
                 elif path == 'ctrl/start':
-                    key = 's'+str(len(tasks)); job = 'j'+key
+                    key = 's'+str(next_session[0]); next_session[0] += 1; job = 'j'+key
                     tasks.append({'session':key,'client_id':body['client_id'],'job':job,'title':body['text'],'state':'completed','assigned':'qwen','ready':True,'has_original':True})
                     sessions[key] = {'original':body['text'],'state':'completed','assigned':'qwen','job':job,'kind':'ctrl-start','models':{'qwen':{'original':body['text'],'route':{'keywords':['检索词'],'sites':[]},'answer':''},'intern':{'original':'','route':None,'answer':''}},'activity':{'qwen':{'state':'completed','stage':'原题和建议已返回'}}}
                     value = {'id':job,'session':key}
@@ -129,7 +130,7 @@ class CtrlBrowserTests(unittest.TestCase):
             self.assertEqual(len(answers),1)
             self.assertEqual(len(reviews),2)
             self.assertEqual(reviews[1]['model'],'intern:deepseek-v4-flash-vision')
-            page.locator('#retry-card').click(modifiers=['Shift'])
+            page.locator('#retry-card').click()
             expect(page.locator('#retry-card')).to_be_enabled()
             page.keyboard.press('Alt+Shift+Enter')
             expect(page.locator('#retry-card')).to_be_enabled()
@@ -171,13 +172,30 @@ class CtrlBrowserTests(unittest.TestCase):
             # Preserve an in-flight left task, archive the other, leave current selected.
             tasks[1]['state']='running'; sessions[tasks[1]['session']]['state']='running'
             expect(small.locator('#task-tabs button').nth(1)).to_have_attribute('aria-label','第 2 题，小窗第二题，可检索')
-            small.locator('#archive-left').click()
+            small.locator('#task-tabs button').nth(2).click(button='right')
             expect(small.locator('#task-tabs button')).to_have_count(2)
             expect(small.locator('#task-tabs button').nth(1)).to_have_attribute('aria-pressed','true')
             expect(small.locator('#stage')).to_contain_text('保留 1 道处理中的题目')
             for width in (480,360):
                 small.set_viewport_size({'width':width,'height':700})
                 self.assertTrue(small.evaluate('() => document.documentElement.scrollWidth <= innerWidth'))
+            small.set_viewport_size({'width':360,'height':420})
+            small.evaluate('window.scrollTo(0,0)')
+            expect(small.locator('#jump-card')).to_have_text('答案 ↓')
+            small.locator('#jump-card').click()
+            expect(small.locator('#jump-card')).to_have_text('顶部 ↑')
+            small.locator('#jump-card').click()
+            expect(small.locator('#jump-card')).to_have_text('答案 ↓')
+            for index in range(5):
+                small.locator('#pip-question').fill('滚轮测试题 '+str(index))
+                small.locator('#pip-start').click()
+                expect(small.locator('#task-tabs button')).to_have_count(3+index)
+            small.locator('#task-tabs').hover()
+            small.mouse.wheel(0,250)
+            small.wait_for_function("document.querySelector('#task-tabs').scrollLeft > 0")
+            self.assertLess(small.evaluate('scrollY'),2)
+            small.mouse.wheel(0,-250)
+            small.wait_for_function("document.querySelector('#task-tabs').scrollLeft === 0")
             small.screenshot(path=str(out/'ctrl-api-pip-360.png'),full_page=True)
             small.close()
             expect(page.locator('#ctrl-board > :first-child')).to_have_class('board-head')

@@ -60,3 +60,7 @@ main{padding:20px 24px}.intro{margin-bottom:16px}.intro h1{font-size:22px;margin
 .result-heading .stage-tools .review-choice option{color:#20382e;background:white}
 .result-heading .stage-tools .review-choice:hover{background-color:#eef4ef}
 @media(pointer:coarse){.result-heading .stage-tools .review-choice{min-height:44px;min-width:32px;width:32px;flex-basis:32px}}
+
+.jump-card{position:fixed;right:16px;bottom:16px;z-index:25;font-size:12px;padding:7px 10px;background:#fff;border:1px solid #bfd5c5;box-shadow:0 2px 10px #20382e18}
+.pip-body .jump-card{right:10px;bottom:10px}
+.answer-section{scroll-margin-top:60px}

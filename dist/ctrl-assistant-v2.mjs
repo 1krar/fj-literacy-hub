@@ -8,7 +8,7 @@ const ids = ['call-mode','ocr-model','analysis-model','answer-model','answer-thi
   'progress-fill','progress-label','elapsed','model-progress','route-tabs','answer-tabs','original-section',
   'original','view-image','copy-original','search-section','keywords','copy-keywords','sites','ask-answer',
   'answer','copy-answer','error','copy-error','pip-return','return-card','image-dialog','full-image','close-image'];
-ids.push('archive-left','toggle-marks','option-marks','answer-source','answer-section','refresh-feedback','settings-open','settings-dialog','close-settings','strategy-summary','adopt-original','ocr-difference','ocr-diff-text');
+ids.push('jump-card','read-retry-card','archive-left','toggle-marks','option-marks','answer-source','answer-section','refresh-feedback','settings-open','settings-dialog','close-settings','strategy-summary','adopt-original','ocr-difference','ocr-diff-text');
 for (const part of ['ocr','analysis','answer']) ids.push('version-'+part,'review-'+part,'review-choice-'+part,'note-'+part);
 const ui = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
 const local = location.hostname === '127.0.0.1' && location.port === '8771';
@@ -41,7 +41,8 @@ function controls() {
   const retryable = task && (task.failedJob || (!task.session && task.state === 'failed') ||
     Object.values(task.jobData?.results || {}).some(value => value.state === 'failed'));
   ui['retry-card'].disabled = !local || !retryable || task.state === 'running' || task.retryPending;
-  ui['rerun-card'].disabled = ui['retry-card'].disabled;
+  ui['rerun-card'].disabled = ui['retry-card'].disabled; ui['read-retry-card'].disabled = ui['retry-card'].disabled;
+  updateJumpButton();
   ui['qwen-save'].disabled = !local || ui['qwen-save'].dataset.saving === 'true';
   ui['archive-task'].disabled = !local || !task || task.state === 'running';
   ui['archive-left'].disabled = !local || archiveLeftPending || tasks.indexOf(task) < 1;
@@ -96,6 +97,7 @@ function drawTaskTabs() {
     const state = document.createElement('i'); state.textContent = task.state === 'failed' || task.hasFailure ? '!' : task.state === 'completed' || task.ready ? '✓' : '·';
     button.append(index, label, state);
     button.addEventListener('click', () => selectTask(task.id));
+    button.addEventListener('contextmenu', event => { event.preventDefault(); archiveLeftOf(task); });
     return button;
   }));
   if (focused) [...ui['task-tabs'].children].find(button => button.dataset.taskId === focused)?.focus({preventScroll:true});
@@ -185,8 +187,8 @@ function drawSelected() {
   drawModelTabs(ui['answer-tabs'],task,'answer',task.answerSelected,name => task.answerSelected = name);
   if (task.versions) { ui['route-tabs'].hidden = true; ui['answer-tabs'].hidden = true; }
   const job = task.jobData;
-  if (job?.state === 'running') stage(Object.entries(job.results || {}).map(([name,item]) => `${names[name] || '自动派单'}：${item.stage || '处理中'}`).join('；'));
-  else if (task.state === 'failed') stage('当前题未完成；可以点击重试。');
+  if (job?.state === 'running') stage((task.autoRedoCount && !originalOf(task) ? '自动重做 1/1 · ' : '')+Object.entries(job.results || {}).map(([name,item]) => `${names[name] || '自动派单'}：${item.stage || '处理中'}`).join('；'));
+  else if (task.state === 'failed') stage(task.autoRedoCount && !originalOf(task) ? '已自动重做一次，仍未返回原题；可手动重试。' : '当前题未完成；可以点击重试。');
   else stage(task.state === 'completed' ? '当前题已就绪，可复制或打开检索网站。' : '当前题排队处理中；可以继续粘贴下一题。');
   const failures = Object.entries(job?.results || {}).filter(([,value]) => value.state === 'failed');
   error(task.error || failures.map(([name,value]) => `${names[name]}：${value.error || '请检查原窗口'}`).join('\n'));
@@ -197,6 +199,7 @@ async function loadTask(task) {
   try {
     const session = await api('ctrl/session?id='+encodeURIComponent(task.session));
     task.data = session.models; task.title = (session.original || task.title || '截图识别中').replace(/\s+/g,' ').slice(0,45);
+    task.autoRedoCount = session.auto_redo_count || 0;
     task.canonicalOriginal = session.original; task.versions = session.versions; task.revision = session.original_revision || 'base';
     task.failedJob = session.failed_job;
     task.state = session.state; task.job = session.job; task.error = '';
@@ -333,8 +336,9 @@ ui['archive-task'].addEventListener('click',async () => {
     drawSelected(); if (selected()) await loadTask(selected()); }
   catch(e) { error(e.message); }
 });
-ui['archive-left'].addEventListener('click', async () => {
-  const current = selected(); if (!current || archiveLeftPending) return;
+ui['archive-left'].addEventListener('click', () => archiveLeftOf(selected()));
+async function archiveLeftOf(current) {
+  if (!current || archiveLeftPending || !local) return;
   const left = tasks.slice(0,tasks.indexOf(current));
   archiveLeftPending = true; controls(); let count = 0, skipped = 0; const failures = [];
   for (const task of left) {
@@ -350,8 +354,9 @@ ui['archive-left'].addEventListener('click', async () => {
   archiveLeftPending = false; renderSignature = ''; drawSelected();
   stage(`已归档左侧 ${count} 题`+(skipped ? `，保留 ${skipped} 道处理中的题目。` : '。'));
   if (failures.length) error('部分题目未归档：'+[...new Set(failures)].join('；'));
-});
-async function retrySelected(mode='read_first') { const task = selected(); if (!task || task.retryPending) return;
+  if (selectedId && !selected()) { selectedId = current.id; persistSelection(); renderSignature = ''; drawSelected(); }
+}
+async function retrySelected(mode='restart') { const task = selected(); if (!task || task.retryPending) return;
   task.retryPending = true; controls(); task.error = '';
   try { const result = task.session ? await api('ctrl/retry',{job:task.failedJob || task.job,mode}) :
       await api('ctrl/start',{text:task.inputText,image:task.image,models:task.models,
@@ -362,7 +367,8 @@ async function retrySelected(mode='read_first') { const task = selected(); if (!
   catch (e) { task.error = e.message; drawSelected(); }
   finally { task.retryPending = false; controls(); }
 }
-ui['retry-card'].addEventListener('click',event => retrySelected(event.shiftKey ? 'restart' : 'read_first'));
+ui['retry-card'].addEventListener('click',() => retrySelected('restart'));
+ui['read-retry-card'].addEventListener('click',() => { ui['read-retry-card'].closest('details').open=false; retrySelected('read_first'); });
 ui['rerun-card'].addEventListener('click',() => { ui['rerun-card'].closest('details').open=false; retrySelected('restart'); });
 ui['copy-original'].addEventListener('click',() => copy(selected()?.visibleOriginal || originalOf(selected())));
 ui['copy-keywords'].addEventListener('click',() => copy((selected()?.visibleRoute?.keywords || []).join(' ')));
@@ -402,11 +408,12 @@ ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; 
     pip.document.title='CTRL 检索卡片'; pip.document.body.className='pip-body';
     bindImageCapture(pip.document, enqueueImage, e => error(e.message));
     bindRedoShortcut(pip.document);
+    pip.addEventListener('scroll',updateJumpButton,{passive:true}); pip.addEventListener('resize',updateJumpButton);
     ui['ctrl-board'].prepend(taskBar);
     pip.document.body.append(ui['ctrl-board']); ui['pip-return'].hidden=false;
-    ui.float.textContent='收回小窗';
+    ui.float.textContent='收回小窗'; updateJumpButton();
     pip.addEventListener('pagehide',() => { taskBarAnchor.after(taskBar); boardHome.prepend(ui['ctrl-board']); pip=null;
-      ui['pip-return'].hidden=true; ui.float.textContent='置顶小窗 ↗'; }); }
+      ui['pip-return'].hidden=true; ui.float.textContent='置顶小窗 ↗'; updateJumpButton(); }); }
   catch { taskBarAnchor.after(taskBar); pip=null; error('置顶小窗无法打开，请并排使用浏览器窗口。'); }
 });
 async function refreshConnections() { const statuses = await Promise.all(Object.keys(names).filter(name =>
@@ -680,3 +687,27 @@ function drawOptionMarks(task) {
 }
 function saveMarks(task) { try { if (task.session) sessionStorage.setItem(marksKey(task),JSON.stringify({enabled:task.marking,selected:task.marks})); } catch {} }
 ui['toggle-marks'].addEventListener('click', () => { const task = selected(); if (!task) return; task.marking = !task.marking; saveMarks(task); drawOptionMarks(task); });
+
+ui['task-tabs'].addEventListener('wheel', event => {
+  if (!pip || ui['task-tabs'].scrollWidth <= ui['task-tabs'].clientWidth) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  if (!delta) return;
+  event.preventDefault(); ui['task-tabs'].scrollLeft += delta*(event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? ui['task-tabs'].clientWidth : 1);
+}, {passive:false});
+function updateJumpButton() {
+  const view = ui['ctrl-board'].ownerDocument.defaultView, button = ui['jump-card'];
+  const answer = ui['answer-section'], rect = answer.getBoundingClientRect();
+  const below = !answer.hidden && rect.top >= view.innerHeight-30;
+  button.hidden = !below && view.scrollY < 80;
+  button.dataset.target = below ? 'answer' : 'top';
+  button.textContent = below ? '答案 ↓' : '顶部 ↑';
+  button.title = below ? '跳到直接问答案' : '返回题目标签和原题';
+}
+ui['jump-card'].addEventListener('click', () => {
+  const view = ui['ctrl-board'].ownerDocument.defaultView;
+  const behavior = view.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+  if (ui['jump-card'].dataset.target === 'answer') ui['answer-section'].scrollIntoView({block:'start',behavior});
+  else view.scrollTo({top:0,behavior});
+});
+window.addEventListener('scroll',updateJumpButton,{passive:true});
+window.addEventListener('resize',updateJumpButton);
