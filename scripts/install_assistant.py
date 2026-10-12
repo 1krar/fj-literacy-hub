@@ -5,20 +5,20 @@ import sys
 import winreg
 from start_assistant import ensure_environment
 
-ROOT=Path(__file__).resolve().parents[1]
+from app_paths import ROOT
 STARTUP_KEY=r'Software\Microsoft\Windows\CurrentVersion\Run'
 STARTUP_NAME='LiteracyHubAssistant'
 
 def set_startup(enabled, interpreter):
     if enabled:
-        command=f'"{interpreter}" -B "{ROOT / "scripts/start_assistant.py"}" --no-browser'
+        command=(f'"{interpreter}" --launch --no-browser' if getattr(sys,'frozen',False) else f'"{interpreter}" -B "{ROOT / "scripts/start_assistant.py"}" --no-browser')
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY) as key:
             winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, command)
     else:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
                 value, _ = winreg.QueryValueEx(key, STARTUP_NAME)
-                if 'scripts/start_assistant.py' in value.replace('\\', '/'):
+                if 'scripts/start_assistant.py' in value.replace('\\', '/') or (str(interpreter) in value and '--launch --no-browser' in value):
                     winreg.DeleteValue(key, STARTUP_NAME)
         except FileNotFoundError:
             pass
@@ -30,9 +30,9 @@ def main():
     startup.add_argument('--no-startup',action='store_true',help='移除本项目的登录启动项')
     args=parser.parse_args()
     ensure_environment()
-    interpreter=Path(sys.executable).with_name('pythonw.exe')
+    interpreter=Path(sys.executable) if getattr(sys,'frozen',False) else Path(sys.executable).with_name('pythonw.exe')
     if not interpreter.is_file():raise RuntimeError('未找到pythonw.exe，请使用完整Windows Python环境')
-    command=f'"{interpreter}" -B "{ROOT / "scripts/start_assistant.py"}" --protocol "%1"'
+    command=(f'"{interpreter}" --launch --protocol "%1"' if getattr(sys,'frozen',False) else f'"{interpreter}" -B "{ROOT / "scripts/start_assistant.py"}" --protocol "%1"')
     base=r'Software\Classes\literacy-assistant'
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER,base) as key:
         winreg.SetValueEx(key,'',0,winreg.REG_SZ,'URL:Literacy Assistant')

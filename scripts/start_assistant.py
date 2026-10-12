@@ -12,8 +12,8 @@ import html
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
-URL = 'http://127.0.0.1:8771/assistant.html'
+from app_paths import ROOT
+URL = 'http://127.0.0.1:8771/ctrl-assistant.html'
 
 
 def running():
@@ -42,6 +42,8 @@ def ensure_environment():
         if not (provider_root/'src/evidence_chain/providers/ai'/f'{name}_web.py').is_file():
             raise RuntimeError('缺少模型连接组件，请保留项目旁的evidence-chain目录')
     if importlib.util.find_spec('playwright') is None:
+        if getattr(sys, 'frozen', False):
+            raise RuntimeError('运行包缺少 Playwright，请重新完整解压运行包')
         completed=subprocess.run([sys.executable,'-m','pip','install','playwright'],
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -87,7 +89,8 @@ def main():
             runtime=ROOT/'.runtime'
             env=dict(os.environ,PYTHONUTF8='1')
             with (runtime/'assistant.stdout.log').open('ab') as out,(runtime/'assistant.stderr.log').open('ab') as err:
-                process=subprocess.Popen([sys.executable,'-B',str(ROOT/'scripts/assistant_server.py')],cwd=ROOT,
+                command = [sys.executable,'--serve'] if getattr(sys,'frozen',False) else [sys.executable,'-B',str(ROOT/'scripts/assistant_server.py')]
+                process=subprocess.Popen(command,cwd=ROOT,
                     stdout=out,stderr=err,env=env,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             (runtime/'assistant.pid').write_text(str(process.pid))
             for _ in range(125):

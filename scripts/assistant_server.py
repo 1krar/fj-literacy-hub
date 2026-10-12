@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-ROOT = Path(__file__).resolve().parents[1]
+from app_paths import ROOT
 MAX_IMAGE = 5 * 1024 * 1024
 if str(ROOT / 'scripts') not in sys.path:
     sys.path.insert(0, str(ROOT / 'scripts'))

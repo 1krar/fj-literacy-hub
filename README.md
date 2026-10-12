@@ -12,11 +12,17 @@ CTRL 助手支持连续收题：粘贴或拖入截图后默认自动建题并入
 
 ## Windows 本机助手
 
+推荐使用 Windows x64 运行包：完整解压后双击 `CTRLHelper.exe`，点击「一键启动 CTRL」。它自带 Python 和浏览器连接组件，无需另外安装 Python 或 Node.js。不要只复制 EXE，保留 `_internal`、`dist` 和 `vendor`。首次在新电脑填写自己的 API Key；网页模型需要在助手自己的窗口登录。
+
+可视化启动器提供文件、保存目录、Edge、后台端口和 API 配置检查，以及网络检查、复制诊断报告、打开设置和安装网站启动入口。诊断报告不包含 Key、Cookie、题目或截图。详见 [Windows 运行包说明](docs/windows-portable.md)。运行包由维护者另行分发；GitHub 的 Code → Download ZIP 是源码包，按以下步骤运行。
+
 1. 下载仓库 ZIP 并完整解压，或 `git clone` 此仓库。
 2. 安装 Python 3.12 或更新版本及 Microsoft Edge。Python 安装时勾选加入 PATH。
 3. 双击根目录的 `安装一键启动.cmd`。选择 Y 可在登录 Windows 后后台预启动，选择 N 可关闭；两种选择都会为当前 Windows 用户注册 `literacy-assistant://open`。缺少 Playwright 时安装器会联网安装。
 4. 从网站大标题打开新的 CTRL 助手标签；已预启动的服务会直接进入。服务未运行时在启动页点击原生“启动本机助手”链接，或双击 `启动比赛助手.cmd`。首次浏览器提示打开应用或访问本地网络时按需允许。
 5. 在助手打开的 Gemini / DeepSeek 窗口登录你自己的账号。数据库网站使用普通 Edge 自己的登录状态。
+
+源码包也可双击 `启动诊断器.cmd` 打开可视化启动器；此方式仍需要 Python 和 Playwright。构建免装 Python 包时，在 Windows Python 环境安装 `playwright`、`pyinstaller` 后执行 `python scripts/build_windows.py`。
 
 本机路线助手地址：`http://127.0.0.1:8771/assistant.html`；CTRL 助手地址：`http://127.0.0.1:8771/ctrl-assistant.html`。网页服务只监听本机地址。请保持助手页打开，置顶小窗依赖该页面；CTRL 助手和题目路线助手的小窗都能直接粘贴文字或截图并提交，输入会同步回原页面。普通 Edge 的模型登录不一定与助手独立模型窗口共享；新设备首次需要在模型窗口登录。
 

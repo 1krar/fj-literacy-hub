@@ -711,3 +711,5 @@ ui['jump-card'].addEventListener('click', () => {
 });
 window.addEventListener('scroll',updateJumpButton,{passive:true});
 window.addEventListener('resize',updateJumpButton);
+
+if (location.hash === '#settings') ui['settings-dialog'].showModal();

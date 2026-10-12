@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 import json
 import re
 
-ROOT = Path(__file__).resolve().parents[1]
+from app_paths import ROOT
 OCR_PROMPT = '只抄录截图中的完整题目和选项，保留原顺序；看不清写[不清]。不要解答。'
 ANSWER_PROMPT = '直接回答上文原题，保留选项字母；简述依据。若需数据库或实时信息核验，明确写“待核验”，不要编造来源。'
 
@@ -137,6 +137,5 @@ def parse_route(raw, question=''):
     if isinstance(data.get('answer'), str):
         result['answer'] = data['answer'].strip()[:12000]
     return result
-
 
 
