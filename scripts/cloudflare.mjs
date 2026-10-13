@@ -1,4 +1,4 @@
-import { generateKeyPairSync, privateDecrypt, constants } from 'node:crypto';
+import { generateKeyPairSync, privateDecrypt, constants, createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -43,7 +43,27 @@ if (mode === 'init-key') {
     const privateKey = powershell("$ErrorActionPreference='Stop'; $taskSecure=ConvertTo-SecureString ([IO.File]::ReadAllText($env:CODEX_CF_KEY_FILE)); $taskPointer=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($taskSecure); try { [Console]::Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($taskPointer)) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($taskPointer) }");
     token = privateDecrypt({ key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, readFileSync(tokenFile)).toString('utf8');
   }
-  if (mode === 'verify') {
+  if (mode === 'access-setup') {
+    if (!token) throw new Error('Cloudflare deployment credential is not configured.');
+    const password=readFileSync(0,'utf8').trim();
+    if (!password || password.length>128) throw new Error('Provide the site password on stdin.');
+    const config=JSON.parse(readFileSync(join(project,'wrangler.jsonc'),'utf8'));
+    const url=`https://api.cloudflare.com/client/v4/accounts/${account.account_id}/pages/projects/${config.name}`;
+    const headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
+    const response=await fetch(url,{headers});const current=await response.json();
+    if (!response.ok || !current.success)throw new Error(`Pages project read failed (HTTP ${response.status}).`);
+    const secret=randomBytes(32).toString('hex'),digest=createHash('sha256').update(password).digest('hex');
+    const deployment_configs={};
+    for(const target of ['production','preview']) {
+      const existing=current.result.deployment_configs?.[target]?.env_vars || {};
+      deployment_configs[target]={fail_open:false,env_vars:{...existing,
+        SITE_PASSWORD_SHA256:{type:'secret_text',value:digest},SITE_SESSION_SECRET:{type:'secret_text',value:secret}}};
+    }
+    const updated=await fetch(url,{method:'PATCH',headers,body:JSON.stringify({deployment_configs})});
+    const result=await updated.json();
+    if (!updated.ok || !result.success)throw new Error(`Access setup failed (HTTP ${updated.status}).`);
+    console.log('Pages access secrets configured for production and preview; values are not logged.');
+  } else if (mode === 'verify') {
     if (!token) throw new Error('Cloudflare deployment credential is not configured.');
     const headers = { Authorization: `Bearer ${token}` };
     const config = JSON.parse(readFileSync(join(project, 'wrangler.jsonc'), 'utf8'));
