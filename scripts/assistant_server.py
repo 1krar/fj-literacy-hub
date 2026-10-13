@@ -245,7 +245,7 @@ def handler_for(jobs, session, ctrl_jobs=None):
             if path == '/api/launch-status':
                 self.reply(200, {'app': 'literacy-assistant', 'ready': True})
             elif path == '/api/session':
-                self.reply(200, {'session': session, 'api_only': API_ONLY})
+                self.reply(200, {'session': session, 'api_only': API_ONLY, 'native_windows': API_ONLY and os.name == 'nt'})
             elif path.startswith('/api/'):
                 if not hmac.compare_digest(self.headers.get('X-Assistant-Session', ''), session):
                     self.reply(403, {'error': '请刷新本机助手页面'})
@@ -314,6 +314,15 @@ def handler_for(jobs, session, ctrl_jobs=None):
                 if API_ONLY:
                     from api_only import validate_api_request
                     validate_api_request(data, self.path)
+                if self.path == '/api/windows/pin' and API_ONLY:
+                    from windows_native import pin_window
+                    self.reply(200,pin_window(data.get('window_id'),data.get('enabled',True)))
+                    return
+                if self.path == '/api/windows/clipboard-image' and API_ONLY:
+                    if data.get('confirm') is not True:raise ValueError('请点击粘贴截图或按 Ctrl+V 后读取剪贴板')
+                    from windows_native import clipboard_image
+                    self.reply(200,clipboard_image())
+                    return
                 if self.path == '/api/diagnostics/network':
                     from windows_diagnostics import connectivity
                     self.reply(200, {'checks':connectivity()})

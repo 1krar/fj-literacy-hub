@@ -64,3 +64,11 @@ main{padding:20px 24px}.intro{margin-bottom:16px}.intro h1{font-size:22px;margin
 .jump-card{position:fixed;right:16px;bottom:16px;z-index:25;font-size:12px;padding:7px 10px;background:#fff;border:1px solid #bfd5c5;box-shadow:0 2px 10px #20382e18}
 .pip-body .jump-card{right:10px;bottom:10px}
 .answer-section{scroll-margin-top:60px}
+.legacy-compact .top,.legacy-compact .intro,.legacy-compact .input-card{display:none}
+.legacy-compact main{padding:0;max-width:none}
+.legacy-compact .layout{display:block}
+.legacy-compact .result-card{padding:8px;border:0;border-radius:0}
+.legacy-compact .board-actions{max-width:none;min-width:0;flex:1}
+.legacy-compact .board-head h2{font-size:14px;white-space:nowrap;flex:0 0 auto}
+.legacy-compact #ctrl-board{width:100%}
+.legacy-compact .settings-dialog{max-width:calc(100vw - 20px)}

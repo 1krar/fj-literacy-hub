@@ -9,7 +9,7 @@ import zipfile
 ROOT=Path(__file__).resolve().parents[1]
 SCRIPTS=('app_paths.py','api_only.py','assistant_server.py','start_assistant.py',
          'windows7_launcher.py','windows_diagnostics.py','ctrl_assistant.py',
-         'ctrl_multi.py','ctrl_dispatch.py','ctrl_review.py','qwen_api.py','intern_api.py')
+         'ctrl_multi.py','ctrl_dispatch.py','ctrl_review.py','qwen_api.py','intern_api.py','windows_native.py')
 RUNTIMES={'x64':('amd64','3acb1d7d9bde5a79f840167b166bb633'),
           'x86':('win32','659adf421e90fba0f56a9631f79e70fb')}
 

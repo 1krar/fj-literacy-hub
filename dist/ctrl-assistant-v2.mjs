@@ -18,6 +18,14 @@ const boardHome = ui['ctrl-board'].parentElement;
 const taskBar = ui['task-tabs'].parentElement, taskBarAnchor = document.createComment('task-bar-home');
 taskBar.before(taskBarAnchor);
 let csrf = '', pip = null, draftImage = null, selectedId = '', tasks = [], nextNumber = 1;
+let nativeWindows=false, nativePopup=null, nativePinned=false, clipboardBusy=false;
+const windowQuery=new URLSearchParams(location.search), nativeToken=windowQuery.get('window_id') || '';
+const legacyCompact=windowQuery.get('compact')==='1' && /^[a-f0-9]{32}$/.test(nativeToken);
+if (legacyCompact) {
+  document.title='CTRL-FLOAT-'+nativeToken;
+  document.body.classList.add('pip-body','legacy-compact');
+  ui['ctrl-board'].prepend(taskBar);
+}
 let connectionState = {}, watchRunning = false;
 let tabSignature = '';
 let imageQueue = Promise.resolve(), renderSignature = '';
@@ -394,7 +402,22 @@ ui['view-image'].addEventListener('click',async () => { const task = selected();
 ui['close-image'].addEventListener('click',() => ui['image-dialog'].close());
 ui.back.addEventListener('click',() => { pip?.close(); window.focus(); ui.question.scrollIntoView({behavior:'smooth',block:'center'}); });
 ui['return-card'].addEventListener('click',() => pip?.close());
-ui.float.addEventListener('click',async () => { if (pip) { pip.close(); return; }
+ui.float.addEventListener('click',async () => {
+  if (nativeWindows) {
+    if (legacyCompact) { await setNativePin(!nativePinned); return; }
+    if (nativePopup && !nativePopup.closed) { nativePopup.focus(); return; }
+    const bytes=crypto.getRandomValues(new Uint8Array(16));
+    const token=[...bytes].map(value=>value.toString(16).padStart(2,'0')).join('');
+    const url=new URL('ctrl-assistant.html',location.href);url.searchParams.set('compact','1');
+    url.searchParams.set('window_id',token);
+    url.searchParams.set('auto_ocr',ui['auto-ocr'].checked?'1':'0');
+    if (selected()?.session) url.searchParams.set('task',selected().session);
+    nativePopup=window.open(url.href,'CTRL-native-'+token,'popup,width=480,height=700');
+    if (!nativePopup) error('小窗被浏览器拦截，请允许本机助手弹窗后重试。');
+    else stage('已打开独立小窗，正在设置 Windows 置顶；主页面保留。');
+    return;
+  }
+  if (pip) { pip.close(); return; }
   if (!window.documentPictureInPicture) { error('此浏览器不支持置顶小窗。'); return; }
   try { pip = await documentPictureInPicture.requestWindow({width:480,height:700});
     try {
@@ -476,13 +499,32 @@ async function init() { if (!local) { ui.offline.hidden=false; ui.connection.tex
         for (const option of [...ui[stage+'-model'].options])
           if (['deepseek','gemini'].includes(option.value)) option.remove();
       }
-      ui.float.disabled=true; ui.float.title='Win7 兼容版不支持置顶小窗';
-      ui.float.textContent='Win7 API 版';
+      nativeWindows=!!handshake.native_windows;
+      ui.float.disabled=!nativeWindows; ui.float.title='独立窗口，使用 Windows 原生置顶';
+      ui.float.textContent=legacyCompact?'置顶当前小窗':'置顶小窗 ↗';
+      if (nativeWindows) {
+        const paste=document.createElement('button');paste.type='button';paste.id='native-paste-image';
+        paste.textContent='粘贴截图';paste.title='读取 Windows 剪贴板中的截图';
+        paste.addEventListener('click',pasteNativeImage);ui.float.after(paste);
+        document.addEventListener('paste',event => {
+          const items=Array.from(event.clipboardData?.items || []);
+          if (items.some(item=>item.kind==='file' && item.type.startsWith('image/')) ||
+              event.clipboardData?.getData('text/plain') || event.defaultPrevented) return;
+          event.preventDefault();pasteNativeImage();
+        });
+        if (legacyCompact) {
+          ui['auto-ocr'].checked=windowQuery.get('auto_ocr')!=='0';
+          const auto=document.createElement('label');auto.className='quick-answer-toggle';
+          auto.append(ui['auto-ocr'],document.createTextNode('自动识题'));paste.after(auto);
+          const settings=document.createElement('button');settings.type='button';settings.textContent='设置';
+          settings.onclick=()=>ui['settings-open'].click();paste.after(settings);
+        }
+      }
       const diagnostics=document.createElement('a'); diagnostics.href='windows7-diagnostics.html';
       diagnostics.target='_blank'; diagnostics.rel='noopener'; diagnostics.textContent='启动诊断 ↗';
       ui['settings-open'].after(diagnostics);
     }
-    const listing=await api('ctrl/tasks'); const saved=sessionStorage.getItem('ctrl-selected-task');
+    const listing=await api('ctrl/tasks'); const saved=windowQuery.get('task') || sessionStorage.getItem('ctrl-selected-task');
     for (const entry of listing.tasks) {
         if (archiving.has(entry.session)) continue; tasks.push({id:entry.session,number:nextNumber++,session:entry.session,
       job:entry.job,image:null,hadImage:entry.had_image,title:entry.title,state:entry.state,
@@ -496,6 +538,28 @@ async function init() { if (!local) { ui.offline.hidden=false; ui.connection.tex
     ui.offline.hidden=false; }
   controls(); }
 init();
+async function setNativePin(enabled) {
+  ui.float.disabled=true;
+  try { const result=await api('windows/pin',{window_id:nativeToken,enabled});
+    nativePinned=result.topmost;ui.float.textContent=nativePinned?'取消置顶':'置顶当前小窗';
+    stage(nativePinned?'小窗已置顶，可切换其他网页继续检索。':'已取消置顶，小窗仍可使用。');
+  } catch(e) { error(e.message);ui.float.textContent='重试置顶'; }
+  finally { ui.float.disabled=false; }
+}
+async function pasteNativeImage() {
+  if (!nativeWindows || clipboardBusy) return;
+  clipboardBusy=true;const button=document.getElementById('native-paste-image');button.disabled=true;
+  try {
+    const result=await api('windows/clipboard-image',{confirm:true});
+    const binary=atob(result.image.split(',')[1]);const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+    await enqueueImage(new File([bytes],'clipboard.png',{type:'image/png'}));
+  } catch(e) { error(e.message); }
+  finally { clipboardBusy=false;button.disabled=false; }
+}
+if (legacyCompact) {
+  const timer=setInterval(()=> { if (csrf && nativeWindows) { clearInterval(timer);setNativePin(true); } },100);
+  setTimeout(()=>clearInterval(timer),10000);
+}
 
 function updateMode() {
   localStorage.setItem('ctrl-call-mode', ui['call-mode'].value);
