@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CTRL · Win7 启动诊断</title>
+<link rel="stylesheet" href="windows7-diagnostics.css"></head>
+<body><h1>CTRL · API 兼容版启动诊断</h1><p>此页面检查运行环境和后台配置；网络检查不会发送 API Key，也不代表模型权限或额度有效。</p>
+<a href="ctrl-assistant.html">进入 CTRL 助手</a><a href="ctrl-assistant.html#settings">填写 API 设置</a><button id="refresh">重新检查</button><button id="network">网络检查</button><button id="copy">复制诊断报告</button>
+<p id="status" role="status">正在检查…</p><table><thead><tr><th>检查项目</th><th>结果</th><th>说明</th></tr></thead><tbody id="checks"></tbody></table>
+<p class="hint">仅 API 模式。Windows 7 SP1 + Edge 109 或相容的 Chromium 浏览器；不提供网页模型自动化或置顶小窗。请保留整个目录。报告不含题目、截图、Key 或登录数据。</p><script type="module" src="windows7-diagnostics.mjs"></script></body></html>

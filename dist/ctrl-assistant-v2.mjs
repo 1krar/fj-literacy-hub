@@ -465,7 +465,23 @@ for (const name of ['deepseek','gemini']) { ui['open-'+name].addEventListener('c
   ui['route-'+name].addEventListener('change',() => { if (ui['route-'+name].checked && connectionState[name] !== 'ready') connectModel(name); }); }
 async function init() { if (!local) { ui.offline.hidden=false; ui.connection.textContent='静态预览'; controls(); return; }
   try { const response=await fetch('/api/session',{cache:'no-store'}); if (!response.ok) throw Error('本机服务不可用');
-    csrf=(await response.json()).session;
+    const handshake=await response.json(); csrf=handshake.session;
+    if (handshake.api_only) {
+      ui['call-mode'].value='api'; ui['call-mode'].disabled=true;
+      for (const name of ['deepseek','gemini']) {
+        ui['route-'+name].checked=false; ui['route-'+name].disabled=true;
+        ui['open-'+name].hidden=true;
+      }
+      for (const stage of ['ocr','analysis','answer']) {
+        for (const option of [...ui[stage+'-model'].options])
+          if (['deepseek','gemini'].includes(option.value)) option.remove();
+      }
+      ui.float.disabled=true; ui.float.title='Win7 兼容版不支持置顶小窗';
+      ui.float.textContent='Win7 API 版';
+      const diagnostics=document.createElement('a'); diagnostics.href='windows7-diagnostics.html';
+      diagnostics.target='_blank'; diagnostics.rel='noopener'; diagnostics.textContent='启动诊断 ↗';
+      ui['settings-open'].after(diagnostics);
+    }
     const listing=await api('ctrl/tasks'); const saved=sessionStorage.getItem('ctrl-selected-task');
     for (const entry of listing.tasks) {
         if (archiving.has(entry.session)) continue; tasks.push({id:entry.session,number:nextNumber++,session:entry.session,

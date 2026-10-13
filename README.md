@@ -12,6 +12,8 @@ CTRL 助手支持连续收题：粘贴或拖入截图后默认自动建题并入
 
 ## Windows 本机助手
 
+Windows 7 SP1 用户请使用另行分发的 **API 兼容试用包**，不要使用 Python 3.12 的 `CTRLHelper.exe`。兼容包分 x64/x86，自带 Python 3.8，仅调用千问/书生 API；双击包内 `启动 CTRL 助手.cmd`。详见 [Win7 API 兼容说明](docs/windows7-api.md)。已在 Windows 11 验证内置 32/64 位运行时与界面，Win7 实机仍待验证。
+
 推荐使用 Windows x64 运行包：完整解压后双击 `CTRLHelper.exe`，点击「一键启动 CTRL」。它自带 Python 和浏览器连接组件，无需另外安装 Python 或 Node.js。不要只复制 EXE，保留 `_internal`、`dist` 和 `vendor`。首次在新电脑填写自己的 API Key；网页模型需要在助手自己的窗口登录。
 
 可视化启动器提供文件、保存目录、Edge、后台端口和 API 配置检查，以及网络检查、复制诊断报告、打开设置和安装网站启动入口。诊断报告不包含 Key、Cookie、题目或截图。详见 [Windows 运行包说明](docs/windows-portable.md)。运行包由维护者另行分发；GitHub 的 Code → Download ZIP 是源码包，按以下步骤运行。

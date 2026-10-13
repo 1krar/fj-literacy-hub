@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 
-from app_paths import ROOT
+from app_paths import ROOT, API_ONLY
 MAX_IMAGE = 5 * 1024 * 1024
 if str(ROOT / 'scripts') not in sys.path:
     sys.path.insert(0, str(ROOT / 'scripts'))
@@ -25,6 +25,9 @@ from ctrl_multi import MultiCtrlJobs
 from qwen_api import QwenProvider
 from intern_api import InternProvider
 
+def query_value(path, prefix):
+    query = urlsplit(path).query
+    return query[len(prefix):] if query.startswith(prefix) else query
 
 def read_input(data):
     if not isinstance(data, dict):
@@ -53,6 +56,9 @@ def read_input(data):
 
 
 def load_provider(evidence_root):
+    if API_ONLY:
+        from api_only import DisabledWebProvider
+        return {name:DisabledWebProvider() for name in ('gemini','deepseek')}
     # Namespace packages avoid importing the unrelated evidence pipeline.
     # Use the bundled, tested adapters while retaining the existing browser
     # profiles under evidence_root, so current Edge logins are reused.
@@ -239,13 +245,13 @@ def handler_for(jobs, session, ctrl_jobs=None):
             if path == '/api/launch-status':
                 self.reply(200, {'app': 'literacy-assistant', 'ready': True})
             elif path == '/api/session':
-                self.reply(200, {'session': session})
+                self.reply(200, {'session': session, 'api_only': API_ONLY})
             elif path.startswith('/api/'):
                 if not hmac.compare_digest(self.headers.get('X-Assistant-Session', ''), session):
                     self.reply(403, {'error': '请刷新本机助手页面'})
                     return
                 if path == '/api/status':
-                    name = urlsplit(self.path).query.removeprefix('model=') or 'gemini'
+                    name = query_value(self.path, 'model=') or 'gemini'
                     if name not in jobs.providers:
                         self.reply(400, {'error': '未知模型'})
                     else:
@@ -255,19 +261,22 @@ def handler_for(jobs, session, ctrl_jobs=None):
                         self.reply(200, status)
                 elif path == '/api/ctrl/session' and ctrl_jobs:
                     try:
-                        session_id = urlsplit(self.path).query.removeprefix('id=')
+                        session_id = query_value(self.path, 'id=')
                         self.reply(200, ctrl_jobs.get_session(session_id))
                     except KeyError:
                         self.reply(404, {'error': 'CTRL 会话已过期，请重新提交题目'})
                 elif path == '/api/ctrl/tasks' and ctrl_jobs:
                     self.reply(200, {'tasks': ctrl_jobs.list_tasks(), 'dispatch': ctrl_jobs.dispatcher.snapshot()})
+                elif path == '/api/diagnostics':
+                    from windows_diagnostics import diagnose
+                    self.reply(200, {'checks':diagnose()})
                 elif path == '/api/ctrl/qwen-config' and 'qwen' in jobs.providers:
                     self.reply(200, jobs.providers['qwen'].public_config())
                 elif path == '/api/ctrl/intern-config' and 'intern' in jobs.providers:
                     self.reply(200, jobs.providers['intern'].public_config())
                 elif path == '/api/ctrl/image' and ctrl_jobs:
                     try:
-                        session_id = urlsplit(self.path).query.removeprefix('id=')
+                        session_id = query_value(self.path, 'id=')
                         image, suffix = ctrl_jobs.get_image(session_id)
                         if not image:
                             raise KeyError(session_id)
@@ -302,6 +311,13 @@ def handler_for(jobs, session, ctrl_jobs=None):
                 data = json.loads(self.rfile.read(size))
                 if not isinstance(data, dict):
                     raise ValueError('需要参数对象')
+                if API_ONLY:
+                    from api_only import validate_api_request
+                    validate_api_request(data, self.path)
+                if self.path == '/api/diagnostics/network':
+                    from windows_diagnostics import connectivity
+                    self.reply(200, {'checks':connectivity()})
+                    return
                 if self.path == '/api/jobs':
                     self.reply(202, jobs.submit(data))
                 elif self.path == '/api/ctrl/start' and ctrl_jobs:
@@ -350,9 +366,11 @@ def main():
     providers['intern'] = InternProvider(ROOT / '.runtime/intern-config.dpapi')
     jobs = Jobs(providers)
     ctrl_jobs = MultiCtrlJobs(jobs, read_input)
+    if API_ONLY:
+        for name in ('deepseek','gemini'):ctrl_jobs.dispatcher.set_ready(name,False)
     if args.restore_completed:
         handover = args.restore_completed.resolve()
-        if not handover.is_relative_to((ROOT / '.runtime').resolve()):
+        if (ROOT / '.runtime').resolve() not in handover.parents:
             raise ValueError('升级交接文件必须保存在本机 .runtime 目录')
         ctrl_jobs.restore_completed(json.loads(handover.read_text(encoding='utf-8')))
     ctrl_jobs.dispatcher.set_ready('qwen', providers['qwen'].status()['status'] == 'ready')
@@ -369,7 +387,7 @@ def main():
     finally:
         server.server_close()
         ctrl_jobs.shutdown(wait=False)
-        jobs.pool.shutdown(wait=False, cancel_futures=True)
+        jobs.pool.shutdown(wait=False)
 
 
 if __name__ == '__main__':

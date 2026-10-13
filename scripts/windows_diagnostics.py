@@ -8,7 +8,7 @@ import socket
 import tempfile
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError
-from app_paths import ROOT
+from app_paths import ROOT, API_ONLY
 
 BASE = 'http://127.0.0.1:8771'
 
@@ -27,9 +27,10 @@ def diagnose(root=ROOT):
     rows = []
     def add(name, state, detail): rows.append({'name':name,'state':state,'detail':detail})
     add('Windows', '通过' if os.name == 'nt' else '失败', platform.system()+' '+platform.machine())
-    missing = [name for name in ('dist/ctrl-assistant.html','dist/resources.json',
+    required = ('dist/ctrl-assistant.html','dist/resources.json') if API_ONLY else ('dist/ctrl-assistant.html','dist/resources.json',
                'vendor/evidence-chain/src/evidence_chain/providers/ai/gemini_web.py',
-               'vendor/evidence-chain/src/evidence_chain/providers/ai/deepseek_web.py') if not (root/name).is_file()]
+               'vendor/evidence-chain/src/evidence_chain/providers/ai/deepseek_web.py')
+    missing = [name for name in required if not (root/name).is_file()]
     add('运行包文件','失败' if missing else '通过','缺少：'+', '.join(missing) if missing else '文件完整；请保留整个解压目录')
     try:
         folder = root/'.runtime'; folder.mkdir(exist_ok=True)
@@ -37,7 +38,10 @@ def diagnose(root=ROOT):
         add('保存目录','通过','可保存配置及运行日志')
     except OSError:
         add('保存目录','失败','目录不可写；请把整个运行包移到桌面或文档目录，不要在 ZIP 内运行')
-    add('Playwright','通过' if importlib.util.find_spec('playwright') else '失败','已包含浏览器连接组件' if importlib.util.find_spec('playwright') else '源码模式请安装依赖；运行包请重新完整解压')
+    if API_ONLY:
+        add('API 兼容运行时','通过','Python '+platform.python_version()+'；无需 Playwright 或网页模型登录')
+    else:
+        add('Playwright','通过' if importlib.util.find_spec('playwright') else '失败','已包含浏览器连接组件' if importlib.util.find_spec('playwright') else '源码模式请安装依赖；运行包请重新完整解压')
     edge = edge_path()
     add('Microsoft Edge','通过' if edge else '待处理','已找到 Edge' if edge else '未找到 Edge；API 模式可用默认浏览器，网页模型及置顶小窗建议安装 Edge')
     with socket.socket() as connection:

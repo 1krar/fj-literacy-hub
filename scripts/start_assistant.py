@@ -12,7 +12,7 @@ import html
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 
-from app_paths import ROOT
+from app_paths import ROOT, API_ONLY
 URL = 'http://127.0.0.1:8771/ctrl-assistant.html'
 
 
@@ -34,6 +34,10 @@ def validate_protocol(value):
 
 
 def ensure_environment():
+    if API_ONLY:
+        if not (ROOT/'dist/ctrl-assistant.html').is_file():
+            raise RuntimeError('运行包缺少 CTRL 页面，请重新完整解压')
+        return
     default_root=ROOT.parent/'evidence-chain'
     if not (default_root/'src/evidence_chain/providers/ai/gemini_web.py').is_file():
         default_root=ROOT/'vendor/evidence-chain'
